@@ -1,0 +1,142 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+enum Role {
+  user
+  admin
+}
+
+enum PatentStatus {
+  pending_ai
+  pending_admin
+  approved
+  declined
+  draft
+}
+
+enum ReviewStage {
+  ai_filter
+  admin_review
+}
+
+enum ReviewDecision {
+  pass
+  fail
+  flagged
+}
+
+
+model User {
+  id           BigInt   @id @default(autoincrement())
+  name         String   @db.VarChar(255)
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         Role     @default(user)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  submittedPatents Patent[]       @relation("PatentSubmitter")
+  reviewsGiven     PatentReview[] @relation("Reviewer")
+  inventorProfile  Inventor?      @relation("UserInventor")
+
+  @@map("USER")
+}
+
+model Patent {
+  id            BigInt       @id @default(autoincrement())
+  title         String       @db.VarChar(500)
+  abstract      String       @db.Text
+  specification String       @db.Text
+  s3FileUrl     String       @map("s3_file_url") @db.Text
+  status        PatentStatus @default(pending_ai)
+  submittedBy   BigInt       @map("submitted_by")
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime     @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  submitter  User             @relation("PatentSubmitter", fields: [submittedBy], references: [id], onDelete: SetNull)
+  reviews    PatentReview[]
+  inventors  PatentInventor[]
+  categories PatentCategory[]
+
+  @@index([status], name: "idx_patent_status")
+  @@index([submittedBy], name: "idx_patent_submitted_by")
+  @@map("PATENT")
+}
+
+model PatentReview {
+  id                BigInt          @id @default(autoincrement())
+  patentId          BigInt          @map("patent_id")
+  reviewerId        BigInt?         @map("reviewer_id")
+  reviewStage       ReviewStage     @map("review_stage")
+  decision          ReviewDecision?
+  aiConfidenceScore Decimal?        @map("ai_confidence_score") @db.Decimal(5, 2)
+  comments          String?         @db.Text
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  patent   Patent @relation(fields: [patentId], references: [id], onDelete: Cascade)
+  reviewer User?  @relation("Reviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  @@map("PATENT_REVIEW")
+}
+
+model Inventor {
+  id           BigInt   @id @default(autoincrement())
+  userId       BigInt?  @unique @map("user_id") // @unique makes it a 1-to-1 or 1-to-0 relation
+  fullName     String   @map("full_name") @db.VarChar(255)
+  email        String   @unique @db.VarChar(255)
+  organization String?  @db.VarChar(255)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  user    User?            @relation("UserInventor", fields: [userId], references: [id], onDelete: SetNull)
+  patents PatentInventor[]
+
+  @@map("INVENTOR")
+}
+
+model PatentInventor {
+  patentId      BigInt @map("patent_id")
+  inventorId    BigInt @map("inventor_id")
+  inventorOrder Int    @default(1) @map("inventor_order")
+
+  // Relations
+  patent   Patent   @relation(fields: [patentId], references: [id], onDelete: Cascade)
+  inventor Inventor @relation(fields: [inventorId], references: [id], onDelete: Cascade)
+
+  // Composite Primary Key
+  @@id([patentId, inventorId])
+  @@map("PATENT_INVENTOR")
+}
+
+model Category {
+  id   BigInt @id @default(autoincrement())
+  name String @unique @db.VarChar(255)
+
+  // Relations
+  patents PatentCategory[]
+
+  @@map("CATEGORY")
+}
+
+model PatentCategory {
+  patentId   BigInt @map("patent_id")
+  categoryId BigInt @map("category_id")
+
+  // Relations
+  patent   Patent   @relation(fields: [patentId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  // Composite Primary Key
+  @@id([patentId, categoryId])
+  @@map("PATENT_CATEGORY")
+}

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   backend:
     build:
@@ -9,13 +7,35 @@ services:
     environment:
       NODE_ENV: development
       PORT: 5000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-patents}:${POSTGRES_PASSWORD:-patents}@postgres:5432/${POSTGRES_DB:-patents}?schema=public
     ports:
       - "5000:5000"
     volumes:
       - .:/usr/src/app
       - /usr/src/app/node_modules
     depends_on:
-      - minio
+      minio:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: patents-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-patents}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-patents}
+      POSTGRES_DB: ${POSTGRES_DB:-patents}
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-patents} -d ${POSTGRES_DB:-patents}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   minio:
