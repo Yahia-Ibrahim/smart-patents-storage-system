@@ -1,3 +1,23 @@
+exports.submitPatent = async () => {
+  // TODO: implement submission logic for patents
+};
+
+exports.approvePatent = async () => {
+  // TODO: implement approval logic for patents
+};
+
+exports.declinePatent = async () => {
+  // TODO: implement decline logic for patents
+};
+
+exports.getPatent = async () => {
+  // TODO: implement retrieval logic for patents
+};
+
+exports.searchPatents = async () => {
+  // TODO: implement paginated search logic for patents
+};
+
 exports.createPatent = async () => {
   // TODO: implement database-backed creation logic for patents
 };

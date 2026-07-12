@@ -1,3 +1,11 @@
+exports.signupUser = async () => {
+  // TODO: implement signup logic for users
+};
+
+exports.loginUser = async () => {
+  // TODO: implement login logic for users
+};
+
 exports.createUser = async () => {
   // TODO: implement database-backed creation logic for users
 };

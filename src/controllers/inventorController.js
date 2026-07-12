@@ -1,3 +1,11 @@
+exports.searchInventors = async (req, res, next) => {
+  try {
+    res.status(200).json({ message: 'searchInventors not implemented yet', query: req.query });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.createInventor = async (req, res, next) => {
   try {
     res.status(201).json({ message: 'createInventor not implemented yet' });

@@ -1,3 +1,7 @@
+exports.searchInventors = async () => {
+  // TODO: implement paginated search logic for inventors
+};
+
 exports.createInventor = async () => {
   // TODO: implement database-backed creation logic for inventors
 };

@@ -1,3 +1,19 @@
+exports.signupUser = async (req, res, next) => {
+  try {
+    res.status(201).json({ message: 'signupUser not implemented yet' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.loginUser = async (req, res, next) => {
+  try {
+    res.status(200).json({ message: 'loginUser not implemented yet' });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.createUser = async (req, res, next) => {
   try {
     res.status(201).json({ message: 'createUser not implemented yet' });
