@@ -5,6 +5,18 @@ const { protectUser } = require('../middlewares/auth');
 
 const router = express.Router();
 
+/**
+ * @openapi
+ * /inventors/search:
+ *   get:
+ *     summary: Search inventors
+ *     tags: [Inventors]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Inventor search results
+ */
 router.get('/search', protectUser, searchValidation, searchInventors);
 router.post('/', createInventor);
 router.get('/', getAllInventors);

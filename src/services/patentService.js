@@ -18,6 +18,10 @@ exports.searchPatents = async () => {
   // TODO: implement paginated search logic for patents
 };
 
+exports.requestPatentUrl = async () => {
+  // TODO: implement request URL logic for patents
+};
+
 exports.createPatent = async () => {
   // TODO: implement database-backed creation logic for patents
 };

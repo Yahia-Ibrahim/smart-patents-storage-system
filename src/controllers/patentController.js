@@ -38,6 +38,14 @@ exports.searchPatents = async (req, res, next) => {
   }
 };
 
+exports.requestPatentUrl = async (req, res, next) => {
+  try {
+    res.status(201).json({ message: 'requestPatentUrl not implemented yet', body: req.body });
+  } catch (error) {
+    next(error);
+  }
+};
+
 exports.createPatent = async (req, res, next) => {
   try {
     res.status(201).json({ message: 'createPatent not implemented yet' });

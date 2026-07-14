@@ -5,6 +5,7 @@ const morgan = require('morgan');
 const compression = require('compression');
 const routes = require('./routes');
 const { notFound, errorHandler } = require('./middlewares');
+const { setupSwagger } = require('./swagger');
 
 const validateRequest = (validator) => (req, res, next) => {
   const errors = validator(req.body, req.query);
@@ -37,6 +38,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/api', routes);
+setupSwagger(app);
 
 app.use(notFound);
 app.use(errorHandler);

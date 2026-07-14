@@ -5,6 +5,18 @@ const { protectAdmin } = require('../middlewares/auth');
 
 const router = express.Router();
 
+/**
+ * @openapi
+ * /categories:
+ *   post:
+ *     summary: Create a category
+ *     tags: [Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       201:
+ *         description: Category created
+ */
 router.post('/', protectAdmin, categoryValidation, createCategory);
 router.get('/', getAllCategories);
 router.get('/:id', getCategoryById);

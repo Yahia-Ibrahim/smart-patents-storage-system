@@ -7,6 +7,7 @@ services:
     environment:
       NODE_ENV: development
       PORT: 5000
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
       DATABASE_URL: postgresql://${POSTGRES_USER:-patents}:${POSTGRES_PASSWORD:-patents}@postgres:5432/${POSTGRES_DB:-patents}?schema=public
     ports:
       - "5000:5000"
