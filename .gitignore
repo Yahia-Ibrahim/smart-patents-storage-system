@@ -1,4 +1,21 @@
+node_modules/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local data & generated artifacts
 data/
 doc/
-node_modules/
-.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
