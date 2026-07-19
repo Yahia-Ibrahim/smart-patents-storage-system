@@ -1,0 +1,43 @@
+.brandmark {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.brandmark__seal {
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+.brandmark--dark .brandmark__seal {
+  color: var(--accent-300);
+}
+
+.brandmark__wordmark {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+}
+
+.brandmark__name {
+  font-family: var(--font-serif);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  color: var(--color-text);
+}
+
+.brandmark__tag {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.brandmark--dark .brandmark__name {
+  color: #fff;
+}
+.brandmark--dark .brandmark__tag {
+  color: rgba(255, 255, 255, 0.55);
+}

@@ -1,0 +1,214 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.field__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.field__required {
+  color: var(--color-danger);
+}
+
+.field__optional {
+  font-weight: var(--weight-regular);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.field__hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  line-height: var(--leading-snug);
+}
+
+.field__message {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  animation: rise-in var(--duration-fast) var(--ease-out);
+}
+.field__message--error {
+  color: var(--color-danger-text);
+}
+.field__message--success {
+  color: var(--color-success-text);
+}
+
+/* ---- The control itself ---- */
+.control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 40px;
+  padding: 0 var(--space-3);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out);
+}
+
+.control:hover:not(.control--disabled):not(:focus-within) {
+  border-color: var(--color-text-muted);
+}
+
+.control:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: var(--focus-ring);
+}
+
+.control--error {
+  border-color: var(--color-danger);
+}
+.control--error:focus-within {
+  border-color: var(--color-danger);
+  box-shadow: var(--focus-ring-danger);
+}
+
+.control--success {
+  border-color: var(--color-success);
+}
+
+.control--disabled {
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.control__input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-base);
+  outline: none;
+}
+.control__input::placeholder {
+  color: var(--color-text-muted);
+  opacity: 0.8;
+}
+.control__input:disabled {
+  cursor: not-allowed;
+}
+
+/* Chrome autofill — keep it on-theme instead of the default yellow. */
+.control__input:-webkit-autofill,
+.control__input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--color-text);
+  transition: background-color 100000s;
+}
+
+.control__affix {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.control__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  padding: var(--space-1);
+  margin-right: calc(var(--space-2) * -1);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+.control__button:hover {
+  color: var(--color-text);
+}
+
+/* Textarea variant grows vertically. */
+.control--textarea {
+  height: auto;
+  padding: var(--space-3);
+  align-items: stretch;
+}
+.control--textarea .control__input {
+  height: auto;
+  resize: vertical;
+  min-height: 96px;
+  line-height: var(--leading-normal);
+  font-family: inherit;
+}
+
+/* Select */
+.control--select {
+  position: relative;
+  padding-right: var(--space-2);
+}
+.control__select {
+  flex: 1;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: var(--text-base);
+  outline: none;
+  appearance: none;
+  cursor: pointer;
+  padding-right: var(--space-5);
+}
+.control__select:disabled {
+  cursor: not-allowed;
+}
+.control__chevron {
+  position: absolute;
+  right: var(--space-3);
+  pointer-events: none;
+  color: var(--color-text-muted);
+}
+
+/* Password strength meter */
+.strength {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.strength__bars {
+  display: flex;
+  gap: 4px;
+}
+.strength__bar {
+  height: 4px;
+  flex: 1;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-3);
+  transition: background-color var(--duration-base) var(--ease-out);
+}
+.strength__bar.is-on[data-level='1'] {
+  background: var(--color-danger);
+}
+.strength__bar.is-on[data-level='2'] {
+  background: var(--color-warning);
+}
+.strength__bar.is-on[data-level='3'] {
+  background: var(--color-accent);
+}
+.strength__bar.is-on[data-level='4'] {
+  background: var(--color-success);
+}
+.strength__label {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}

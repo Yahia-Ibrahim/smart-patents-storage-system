@@ -26,6 +26,26 @@ Tests use jest + supertest against a **real** Postgres (`TEST_DATABASE_URL`, a s
 suite truncates between tests). `npm test` creates that DB and runs migrations on first run;
 Postgres must be up (`docker compose up -d postgres`).
 
+## Frontend (`frontend/`)
+
+React 18 + TypeScript + Vite SPA in `frontend/`, talking to this API. It has its own
+`package.json`, `README.md`, and `.env.example`. Run it with `npm run dev` from `frontend/`
+(Vite proxies `/api` → `:5000`, so start the backend too). See `frontend/README.md` for the full
+architecture; the short version:
+
+- **Design system first.** All colour/type/spacing/radius/shadow live as CSS custom properties in
+  `frontend/src/styles/tokens.css`; light + dark themes re-map the semantic layer there. Components
+  never hardcode colours or branch on theme. A live showcase is at `/design-system`.
+- `frontend/src/components/ui/` — the reusable component library (Button, Input, Modal, Table,
+  Badge, Toast, …), each with co-located CSS. Import from `@/components/ui`.
+- `frontend/src/services/` — typed API client with automatic access-token refresh; `@/` aliases `src/`.
+- **Design language:** IBM Plex superfamily (Serif headings, Sans UI, Mono for every id/reference);
+  a blueprint-indigo primary with a brass "certification seal" accent; status/role rendered as
+  ink-stamp badges. Grounded in the patent-drawing / legal-document subject on purpose.
+- **Gotcha that already bit once:** never call `tokenStore.clear()` in a `catch` without first
+  ruling out `AbortError`. Aborted requests (StrictMode re-runs, unmounts, navigation) are not auth
+  failures — clearing tokens there logs the user out of a valid session. See `AuthContext.hydrate`.
+
 ## Architecture (backend)
 
 Request flow: `routes/` → rate limiter → validation chain → auth guard → `controllers/` → `services/` → Prisma.

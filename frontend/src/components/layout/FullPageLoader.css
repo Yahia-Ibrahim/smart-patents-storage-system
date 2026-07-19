@@ -1,0 +1,10 @@
+.full-loader {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  color: var(--color-primary);
+  background: var(--color-bg);
+}

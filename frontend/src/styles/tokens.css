@@ -1,0 +1,264 @@
+/* ==========================================================================
+   Design tokens — the single source of truth for the whole app.
+   Every color, size, and motion value elsewhere should reference one of these.
+   Light theme lives on :root; the [data-theme="dark"] block re-maps the
+   semantic layer only, so components never branch on theme themselves.
+   ========================================================================== */
+
+:root {
+  /* ---- Typography ------------------------------------------------------ */
+  --font-serif: 'IBM Plex Serif', ui-serif, Georgia, serif;
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
+
+  /* Type scale — 1.20 minor-third steps, tuned for a dense enterprise UI. */
+  --text-xs: 0.75rem; /* 12 */
+  --text-sm: 0.8125rem; /* 13 */
+  --text-base: 0.875rem; /* 14 — the UI baseline */
+  --text-md: 1rem; /* 16 */
+  --text-lg: 1.125rem; /* 18 */
+  --text-xl: 1.375rem; /* 22 */
+  --text-2xl: 1.75rem; /* 28 */
+  --text-3xl: 2.25rem; /* 36 */
+  --text-4xl: 2.9375rem; /* 47 */
+
+  --leading-tight: 1.18;
+  --leading-snug: 1.35;
+  --leading-normal: 1.55;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0em;
+  --tracking-wide: 0.04em;
+  --tracking-caps: 0.08em; /* eyebrows / overlines */
+
+  /* ---- Spacing — 4px base grid ---------------------------------------- */
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-7: 2rem;
+  --space-8: 2.5rem;
+  --space-9: 3rem;
+  --space-10: 4rem;
+  --space-12: 5rem;
+  --space-16: 8rem;
+
+  /* ---- Radius ---------------------------------------------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
+
+  /* ---- Layout ---------------------------------------------------------- */
+  --sidebar-width: 260px;
+  --sidebar-width-collapsed: 72px;
+  --topbar-height: 64px;
+  --content-max: 1200px;
+
+  /* ---- Motion ---------------------------------------------------------- */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 340ms;
+
+  /* ---- Z-index scale --------------------------------------------------- */
+  --z-sticky: 100;
+  --z-sidebar: 200;
+  --z-dropdown: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+
+  /* =====================================================================
+     COLOR — brand & accent primitives (theme-independent hues)
+     ===================================================================== */
+
+  /* Blueprint indigo — the primary/brand hue. */
+  --brand-50: #eef1fc;
+  --brand-100: #dce2f9;
+  --brand-200: #bcc7f2;
+  --brand-300: #93a3e8;
+  --brand-400: #6376d8;
+  --brand-500: #3f51c6;
+  --brand-600: #2e40b8; /* primary action */
+  --brand-700: #263398;
+  --brand-800: #212c76;
+  --brand-900: #1a2350; /* deep legal navy — brand surfaces */
+  --brand-950: #121834;
+
+  /* Brass / certification seal — the signature accent, used sparingly. */
+  --accent-100: #f5ead3;
+  --accent-200: #ead4a6;
+  --accent-300: #d9b872;
+  --accent-400: #c39a4b;
+  --accent-500: #b0863c; /* seal */
+  --accent-600: #946e2f;
+  --accent-700: #755527;
+
+  /* =====================================================================
+     COLOR — semantic layer (LIGHT). Re-mapped in the dark block below.
+     ===================================================================== */
+
+  /* Surfaces & structure */
+  --color-bg: #f4f6f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef1f5; /* insets, table stripes, subtle fills */
+  --color-surface-3: #e4e8ee; /* pressed / hovered fills */
+  --color-overlay: rgba(20, 26, 38, 0.48);
+
+  --color-border: #dee3ea;
+  --color-border-strong: #c8cfda;
+  --color-border-inverse: rgba(255, 255, 255, 0.14);
+
+  /* Text */
+  --color-text: #171b24;
+  --color-text-secondary: #48505f;
+  --color-text-muted: #6c7686;
+  --color-text-inverse: #ffffff;
+  --color-text-on-brand: #ffffff;
+  --color-text-on-accent: #2a1f08;
+
+  /* Primary (brand) */
+  --color-primary: var(--brand-600);
+  --color-primary-hover: var(--brand-700);
+  --color-primary-active: var(--brand-800);
+  --color-primary-soft: var(--brand-50);
+  --color-primary-soft-text: var(--brand-700);
+  --color-primary-border: var(--brand-200);
+
+  /* Accent (seal) */
+  --color-accent: var(--accent-500);
+  --color-accent-hover: var(--accent-600);
+  --color-accent-soft: var(--accent-100);
+  --color-accent-soft-text: var(--accent-700);
+
+  /* Focus ring */
+  --focus-ring: 0 0 0 3px rgba(46, 64, 184, 0.32);
+  --focus-ring-danger: 0 0 0 3px rgba(181, 55, 44, 0.3);
+
+  /* Feedback — success */
+  --color-success: #1e7a52;
+  --color-success-text: #12603f;
+  --color-success-soft: #e2f3ea;
+  --color-success-border: #b4e0c8;
+
+  /* Feedback — warning */
+  --color-warning: #9a6b12;
+  --color-warning-text: #7c5509;
+  --color-warning-soft: #fbf0d6;
+  --color-warning-border: #eed9a4;
+
+  /* Feedback — danger */
+  --color-danger: #b5372c;
+  --color-danger-hover: #9a2c23;
+  --color-danger-text: #8f271f;
+  --color-danger-soft: #fbe7e4;
+  --color-danger-border: #f2c4bd;
+
+  /* Feedback — info (uses brand) */
+  --color-info: var(--brand-600);
+  --color-info-text: var(--brand-700);
+  --color-info-soft: var(--brand-50);
+  --color-info-border: var(--brand-200);
+
+  /* Neutral badge */
+  --color-neutral-soft: #eef1f5;
+  --color-neutral-soft-text: #48505f;
+  --color-neutral-border: #d7dce4;
+
+  /* Elevation — soft, cool-tinted shadows */
+  --shadow-xs: 0 1px 2px rgba(19, 25, 40, 0.06);
+  --shadow-sm: 0 1px 3px rgba(19, 25, 40, 0.08), 0 1px 2px rgba(19, 25, 40, 0.04);
+  --shadow-md: 0 4px 12px rgba(19, 25, 40, 0.1), 0 2px 4px rgba(19, 25, 40, 0.05);
+  --shadow-lg: 0 12px 32px rgba(19, 25, 40, 0.14), 0 4px 8px rgba(19, 25, 40, 0.06);
+  --shadow-xl: 0 24px 56px rgba(19, 25, 40, 0.2);
+
+  /* Blueprint grid — used on brand/auth surfaces. */
+  --grid-line: rgba(255, 255, 255, 0.07);
+  color-scheme: light;
+}
+
+/* ========================================================================
+   DARK THEME — re-map the semantic layer only.
+   Applies when the user picks dark, or when they have no explicit choice and
+   the OS prefers dark (handled by ThemeContext stamping data-theme).
+   ======================================================================== */
+:root[data-theme='dark'] {
+  --color-bg: #0d1119;
+  --color-surface: #151b26;
+  --color-surface-2: #1b2231;
+  --color-surface-3: #232d3d;
+  --color-overlay: rgba(5, 8, 14, 0.62);
+
+  --color-border: #26303f;
+  --color-border-strong: #35414f;
+  --color-border-inverse: rgba(255, 255, 255, 0.1);
+
+  --color-text: #e7ebf2;
+  --color-text-secondary: #aab4c4;
+  --color-text-muted: #7d8798;
+  --color-text-inverse: #0d1119;
+  --color-text-on-brand: #ffffff;
+  --color-text-on-accent: #241b06;
+
+  /* Lift primary a step so it reads on dark surfaces. */
+  --color-primary: var(--brand-500);
+  --color-primary-hover: var(--brand-400);
+  --color-primary-active: var(--brand-300);
+  --color-primary-soft: rgba(63, 81, 198, 0.16);
+  --color-primary-soft-text: #aab6ee;
+  --color-primary-border: rgba(99, 118, 216, 0.34);
+
+  --color-accent: var(--accent-400);
+  --color-accent-hover: var(--accent-300);
+  --color-accent-soft: rgba(176, 134, 60, 0.18);
+  --color-accent-soft-text: var(--accent-300);
+  --color-text-on-accent: #241b06;
+
+  --focus-ring: 0 0 0 3px rgba(99, 118, 216, 0.4);
+  --focus-ring-danger: 0 0 0 3px rgba(224, 122, 111, 0.36);
+
+  --color-success: #35b07a;
+  --color-success-text: #7fd6ab;
+  --color-success-soft: rgba(30, 122, 82, 0.18);
+  --color-success-border: rgba(53, 176, 122, 0.32);
+
+  --color-warning: #d9a441;
+  --color-warning-text: #ecc884;
+  --color-warning-soft: rgba(154, 107, 18, 0.2);
+  --color-warning-border: rgba(217, 164, 65, 0.32);
+
+  --color-danger: #e0655a;
+  --color-danger-hover: #ea7a70;
+  --color-danger-text: #f0a29a;
+  --color-danger-soft: rgba(181, 55, 44, 0.2);
+  --color-danger-border: rgba(224, 101, 90, 0.34);
+
+  --color-info: var(--brand-400);
+  --color-info-text: #aab6ee;
+  --color-info-soft: rgba(63, 81, 198, 0.16);
+  --color-info-border: rgba(99, 118, 216, 0.3);
+
+  --color-neutral-soft: #232d3d;
+  --color-neutral-soft-text: #aab4c4;
+  --color-neutral-border: #35414f;
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.5), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 14px 36px rgba(0, 0, 0, 0.58), 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-xl: 0 24px 60px rgba(0, 0, 0, 0.66);
+
+  --grid-line: rgba(255, 255, 255, 0.06);
+  color-scheme: dark;
+}

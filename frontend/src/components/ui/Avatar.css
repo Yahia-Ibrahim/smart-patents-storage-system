@@ -1,0 +1,45 @@
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-full);
+  background: var(--avatar-bg, var(--color-surface-3));
+  color: var(--avatar-fg, var(--color-text-secondary));
+  user-select: none;
+  letter-spacing: -0.02em;
+}
+
+.avatar--accent {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-soft-text);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.avatar--sm {
+  width: 28px;
+  height: 28px;
+  font-size: var(--text-xs);
+}
+.avatar--md {
+  width: 36px;
+  height: 36px;
+  font-size: var(--text-sm);
+}
+.avatar--lg {
+  width: 48px;
+  height: 48px;
+  font-size: var(--text-md);
+}
+.avatar--xl {
+  width: 72px;
+  height: 72px;
+  font-size: var(--text-2xl);
+}
+
+/* In dark mode the name-hued light swatches would glow; calm them down. */
+:root[data-theme='dark'] .avatar:not(.avatar--accent) {
+  filter: brightness(0.5) saturate(1.3);
+}

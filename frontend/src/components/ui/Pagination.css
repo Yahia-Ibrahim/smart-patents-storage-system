@@ -1,0 +1,57 @@
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.pagination__summary {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.pagination__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+
+.pagination__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+.pagination__btn:hover:not(:disabled):not(.is-active) {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+.pagination__btn.is-active {
+  background: var(--color-primary);
+  color: var(--color-text-on-brand);
+  font-weight: var(--weight-medium);
+}
+.pagination__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pagination__gap {
+  padding: 0 var(--space-1);
+  color: var(--color-text-muted);
+}

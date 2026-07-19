@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+*.tsbuildinfo
+
+# tsc -b compiles vite.config.ts in place (composite project, no outDir) —
+# vite.config.ts is the only source of truth
+vite.config.js
+vite.config.d.ts
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

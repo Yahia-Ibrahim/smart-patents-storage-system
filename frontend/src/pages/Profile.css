@@ -1,0 +1,87 @@
+.profile__layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: var(--space-5);
+  align-items: start;
+}
+
+/* ---- Summary card ---- */
+.profile__summary-top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+.profile__summary-name {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  margin-top: var(--space-2);
+}
+.profile__summary-email {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-1);
+}
+
+.profile__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5) 0;
+}
+.profile__facts > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.profile__facts dt {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+.profile__facts dd {
+  font-size: var(--text-sm);
+  text-align: right;
+}
+
+.profile__inventor {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+.profile__inventor-name {
+  font-family: var(--font-serif);
+  font-weight: var(--weight-semibold);
+  margin-top: var(--space-2);
+}
+.profile__inventor-org {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* ---- Main / tabs ---- */
+.profile__tab-body {
+  margin-top: var(--space-5);
+}
+
+.profile__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 460px;
+}
+.profile__form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+}
+
+@media (max-width: 860px) {
+  .profile__layout {
+    grid-template-columns: 1fr;
+  }
+}
