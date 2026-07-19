@@ -19,7 +19,8 @@ npm run prisma:migrate   # prisma migrate dev
 npm run prisma:generate  # prisma generate (also runs on postinstall)
 npm run prisma:seed      # seed the initial admin from env vars
 npm run prisma:studio    # prisma studio
-docker compose up        # backend + postgres (host :5433) + minio (:9000/:9001)
+npm run connect:register -- <template>   # register/update a Kafka Connect connector, see kafka-connect/README.md
+docker compose up        # backend + postgres (:5433) + minio (:9000/:9001) + kafka (:29092) + kafka-connect (:8083) + kafka-ui (:8080)
 ```
 
 Tests use jest + supertest against a **real** Postgres (`TEST_DATABASE_URL`, a separate DB the
@@ -45,6 +46,16 @@ architecture; the short version:
 - **Gotcha that already bit once:** never call `tokenStore.clear()` in a `catch` without first
   ruling out `AbortError`. Aborted requests (StrictMode re-runs, unmounts, navigation) are not auth
   failures — clearing tokens there logs the user out of a valid session. See `AuthContext.hydrate`.
+
+## Infrastructure (Kafka / CDC)
+
+`docker-compose.yml` also runs Kafka (KRaft mode, no ZooKeeper) + Kafka Connect running Debezium
++ Kafka UI, for Postgres change-data-capture. **No connector is registered by default** — the
+Postgres service gained `wal_level=logical` and Debezium's plugin is loaded on the Connect
+worker, but no connector config exists until you register one, because a connector config
+necessarily names real tables. See `INFRASTRUCTURE.md` for the full explanation of every piece
+and config choice, and `kafka-connect/README.md` for the connector template + registration
+script (`npm run connect:register`).
 
 ## Architecture (backend)
 

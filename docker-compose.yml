@@ -1,3 +1,8 @@
+networks:
+  patents-net:
+    name: patents-net
+    driver: bridge
+
 services:
   backend:
     build:
@@ -20,11 +25,25 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+    networks:
+      - patents-net
     restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
     container_name: patents-postgres
+    # wal_level=logical (plus the sender/slot headroom below) is what lets
+    # Debezium attach as a logical-replication client via the built-in
+    # pgoutput plugin — no extra Postgres extension needed. Nothing else
+    # about the database changes; this is additive to normal WAL behaviour.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-patents}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-patents}
@@ -38,6 +57,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - patents-net
     restart: unless-stopped
 
   minio:
@@ -53,5 +74,104 @@ services:
     volumes:
       - ./data/minio:/data
     mem_limit: 1g
+    networks:
+      - patents-net
+    restart: unless-stopped
+
+  # --- Event streaming / CDC -------------------------------------------------
+  #
+  # kafka -> kafka-connect (Debezium) -> kafka-ui
+  #
+  # Postgres is the CDC source (see the `command:` block above). Debezium reads
+  # its write-ahead log and publishes row-level change events to Kafka topics;
+  # nothing here assumes which tables you'll capture — see
+  # kafka-connect/connectors/postgres-source.json.template.
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: patents-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CLUSTER_ID: ${KAFKA_CLUSTER_ID:-UM2O03kYNS43ch8HyqJfsg}
+      # Three listener names, one job each: PLAINTEXT for other containers on
+      # patents-net (they reach it as "kafka:9092"), CONTROLLER for KRaft's
+      # internal quorum traffic, EXTERNAL for tools on your host machine.
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Single-broker dev cluster: replication factor 1 everywhere. A
+      # production cluster would run 3+ brokers and raise these to match.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "29092:29092"
+    volumes:
+      - ./data/kafka:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - patents-net
+    restart: unless-stopped
+
+  kafka-connect:
+    image: quay.io/debezium/connect:2.7
+    container_name: patents-kafka-connect
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: patents-connect-cluster
+      # Kafka Connect's own bookkeeping topics — distinct from any topic a
+      # connector produces business data into. Auto-created on first boot.
+      CONFIG_STORAGE_TOPIC: _connect-configs
+      OFFSET_STORAGE_TOPIC: _connect-offsets
+      STATUS_STORAGE_TOPIC: _connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      ENABLE_DEBEZIUM_SCRIPTING: "false"
+    ports:
+      - "8083:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - patents-net
+    restart: unless-stopped
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: patents-kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: patents
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-connect:
+        condition: service_healthy
+    networks:
+      - patents-net
     restart: unless-stopped
 
