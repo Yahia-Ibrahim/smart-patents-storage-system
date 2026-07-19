@@ -1,7 +1,7 @@
 const express = require('express');
 const { createCategory, getAllCategories, getCategoryById, updateCategory, deleteCategory } = require('../controllers/categoryController');
 const { categoryValidation } = require('../utils/validation');
-const { protectAdmin } = require('../middlewares/auth');
+const { requireAdmin } = require('../middlewares/auth');
 
 const router = express.Router();
 
@@ -17,7 +17,7 @@ const router = express.Router();
  *       201:
  *         description: Category created
  */
-router.post('/', protectAdmin, categoryValidation, createCategory);
+router.post('/', requireAdmin, categoryValidation, createCategory);
 router.get('/', getAllCategories);
 router.get('/:id', getCategoryById);
 router.put('/:id', updateCategory);

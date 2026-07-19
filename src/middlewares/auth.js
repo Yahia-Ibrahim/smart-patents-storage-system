@@ -1,70 +1,84 @@
-const { verifyToken, decryptValue } = require('../utils/helpers');
+const { verifyAccessToken } = require('../utils/helpers');
+const { ROLES } = require('../utils/roles');
+const { unauthorized, forbidden } = require('../utils/errors');
 
 const extractBearerToken = (req) => {
   const authHeader = req.headers.authorization || '';
 
   if (!authHeader.startsWith('Bearer ')) {
-    const error = new Error('Bearer token is required');
-    error.status = 401;
-    throw error;
+    throw unauthorized('Bearer token is required');
   }
 
-  return authHeader.slice(7).trim();
+  const token = authHeader.slice(7).trim();
+
+  if (!token) {
+    throw unauthorized('Bearer token is required');
+  }
+
+  return token;
 };
 
-const attachAuthenticatedUser = (req, requiredRole) => {
-  const token = extractBearerToken(req);
-  const decoded = verifyToken(token);
-  const role = decoded.role;
-
-  if (!role) {
-    const error = new Error('User role is missing from token');
-    error.status = 401;
-    throw error;
-  }
-
-  if (requiredRole && role !== requiredRole) {
-    const error = new Error('Forbidden');
-    error.status = 403;
-    throw error;
-  }
-
-  req.user = {
-    ...decoded,
-    userId: decryptValue(decoded.sub || decoded.userId || decoded.id),
-  };
-
-  return req.user;
-};
-
-const protectUser = (req, _res, next) => {
+/**
+ * Verifies the access token and attaches { userId, role } to the request.
+ *
+ * userId is a BigInt because every Prisma id in this schema is BigInt; passing
+ * a string into a where clause throws at query time rather than silently
+ * missing, so the conversion happens once, here.
+ */
+const requireAuth = (req, _res, next) => {
   try {
-    const user = attachAuthenticatedUser(req);
+    const token = extractBearerToken(req);
 
-    if (!['user', 'admin'].includes(user.role)) {
-      const error = new Error('Forbidden');
-      error.status = 403;
-      throw error;
+    let decoded;
+    try {
+      decoded = verifyAccessToken(token);
+    } catch (error) {
+      // jsonwebtoken's messages ("jwt expired", "invalid signature") are safe
+      // to surface and help clients know whether to refresh.
+      throw unauthorized(error.message);
     }
 
+    if (!decoded.sub || !decoded.role) {
+      throw unauthorized('Token is missing required claims');
+    }
+
+    let userId;
+    try {
+      userId = BigInt(decoded.sub);
+    } catch {
+      throw unauthorized('Token subject is not a valid user id');
+    }
+
+    req.user = { userId, role: decoded.role };
     next();
   } catch (error) {
-    error.status = error.status || 401;
     next(error);
   }
 };
 
-const protectAdmin = (req, _res, next) => {
-  try {
-    attachAuthenticatedUser(req, 'admin');
-    next();
-  } catch (error) {
-    error.status = error.status || 401;
-    next(error);
+/**
+ * Role gate. Runs after requireAuth, which guarantees req.user exists.
+ * Kept separate from requireAuth so route definitions read as
+ * "authenticated, and also an admin" rather than hiding the rule in one guard.
+ */
+const requireRole = (...allowedRoles) => (req, _res, next) => {
+  if (!req.user) {
+    return next(unauthorized('Authentication is required'));
   }
+
+  if (!allowedRoles.includes(req.user.role)) {
+    return next(forbidden('You do not have permission to perform this action'));
+  }
+
+  next();
 };
+
+const requireAdmin = [requireAuth, requireRole(ROLES.ADMIN)];
+const requireUser = [requireAuth, requireRole(ROLES.USER, ROLES.ADMIN)];
 
 module.exports = {
-  protectUser,
-  protectAdmin,
+  requireAuth,
+  requireRole,
+  requireAdmin,
+  requireUser,
 };

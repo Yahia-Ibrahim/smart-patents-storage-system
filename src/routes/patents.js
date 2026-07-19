@@ -1,7 +1,7 @@
 const express = require('express');
 const { submitPatent, approvePatent, declinePatent, getPatent, searchPatents, requestPatentUrl, createPatent, getAllPatents, getPatentById, updatePatent, deletePatent } = require('../controllers/patentController');
 const { patentSubmissionValidation, searchValidation } = require('../utils/validation');
-const { protectUser, protectAdmin } = require('../middlewares/auth');
+const { requireUser, requireAdmin } = require('../middlewares/auth');
 
 const router = express.Router();
 
@@ -31,7 +31,7 @@ const router = express.Router();
  *       201:
  *         description: Patent submitted
  */
-router.post('/submit', protectUser, patentSubmissionValidation, submitPatent);
+router.post('/submit', requireUser, patentSubmissionValidation, submitPatent);
 
 /**
  * @openapi
@@ -45,7 +45,7 @@ router.post('/submit', protectUser, patentSubmissionValidation, submitPatent);
  *       201:
  *         description: Patent request URL endpoint placeholder
  */
-router.post('/requesturl', protectUser, requestPatentUrl);
+router.post('/requesturl', requireUser, requestPatentUrl);
 
 /**
  * @openapi
@@ -59,7 +59,7 @@ router.post('/requesturl', protectUser, requestPatentUrl);
  *       200:
  *         description: Patent approved
  */
-router.post('/approve', protectAdmin, approvePatent);
+router.post('/approve', requireAdmin, approvePatent);
 
 /**
  * @openapi
@@ -73,7 +73,7 @@ router.post('/approve', protectAdmin, approvePatent);
  *       200:
  *         description: Patent declined
  */
-router.post('/decline', protectAdmin, declinePatent);
+router.post('/decline', requireAdmin, declinePatent);
 
 /**
  * @openapi
@@ -100,7 +100,7 @@ router.post('/decline', protectAdmin, declinePatent);
  *       200:
  *         description: Patent retrieved
  */
-router.get('/get', protectUser, searchValidation, getPatent);
+router.get('/get', requireUser, searchValidation, getPatent);
 
 /**
  * @openapi
@@ -129,7 +129,7 @@ router.get('/get', protectUser, searchValidation, getPatent);
  *       200:
  *         description: Paginated patent search results
  */
-router.get('/search', protectUser, searchValidation, searchPatents);
+router.get('/search', requireUser, searchValidation, searchPatents);
 
 /**
  * @openapi

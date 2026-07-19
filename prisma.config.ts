@@ -6,4 +6,8 @@ export default defineConfig({
   datasource: {
     url: env('DATABASE_URL'),
   },
+  migrations: {
+    // Prisma 7 reads the seed command from here, not from package.json.
+    seed: 'node prisma/seed.js',
+  },
 });
