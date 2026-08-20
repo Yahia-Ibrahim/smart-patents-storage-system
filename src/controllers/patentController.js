@@ -1,46 +1,18 @@
-exports.submitPatent = async (req, res, next) => {
-  try {
-    res.status(201).json({ message: 'submitPatent not implemented yet' });
-  } catch (error) {
-    next(error);
-  }
-};
+const patentService = require('../services/patentService');
+const { sendSuccess } = require('../utils/response');
+const { toPatentDto, toPatentDetailDto, toPatentReviewDto } = require('../utils/dto');
 
-exports.approvePatent = async (req, res, next) => {
-  try {
-    res.status(200).json({ message: 'approvePatent not implemented yet' });
-  } catch (error) {
-    next(error);
-  }
-};
+/**
+ * Thin HTTP layer: unwrap the request, call the service, map to a DTO.
+ * Every authorization and state-machine decision lives in patentService.
+ */
 
-exports.declinePatent = async (req, res, next) => {
+exports.requestUpload = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'declinePatent not implemented yet' });
-  } catch (error) {
-    next(error);
-  }
-};
+    const { filename, contentType } = req.body;
+    const result = await patentService.requestUpload({ filename, contentType }, req.user);
 
-exports.getPatent = async (req, res, next) => {
-  try {
-    res.status(200).json({ message: 'getPatent not implemented yet', query: req.query });
-  } catch (error) {
-    next(error);
-  }
-};
-
-exports.searchPatents = async (req, res, next) => {
-  try {
-    res.status(200).json({ message: 'searchPatents not implemented yet', query: req.query });
-  } catch (error) {
-    next(error);
-  }
-};
-
-exports.requestPatentUrl = async (req, res, next) => {
-  try {
-    res.status(201).json({ message: 'requestPatentUrl not implemented yet', body: req.body });
+    sendSuccess(res, 201, result);
   } catch (error) {
     next(error);
   }
@@ -48,15 +20,27 @@ exports.requestPatentUrl = async (req, res, next) => {
 
 exports.createPatent = async (req, res, next) => {
   try {
-    res.status(201).json({ message: 'createPatent not implemented yet' });
+    const patent = await patentService.createPatent(req.body, req.user);
+
+    sendSuccess(res, 201, toPatentDetailDto(patent));
   } catch (error) {
     next(error);
   }
 };
 
-exports.getAllPatents = async (_req, res, next) => {
+exports.listPatents = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'getAllPatents not implemented yet' });
+    const result = await patentService.listPatents(req.query, req.user);
+
+    sendSuccess(res, 200, {
+      patents: result.patents.map(toPatentDto),
+      pagination: {
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -64,7 +48,9 @@ exports.getAllPatents = async (_req, res, next) => {
 
 exports.getPatentById = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'getPatentById not implemented yet', id: req.params.id });
+    const patent = await patentService.getPatentById(BigInt(req.params.id), req.user);
+
+    sendSuccess(res, 200, toPatentDetailDto(patent));
   } catch (error) {
     next(error);
   }
@@ -72,7 +58,47 @@ exports.getPatentById = async (req, res, next) => {
 
 exports.updatePatent = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'updatePatent not implemented yet', id: req.params.id });
+    const patent = await patentService.updatePatent(BigInt(req.params.id), req.body, req.user);
+
+    sendSuccess(res, 200, toPatentDetailDto(patent));
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.submitPatent = async (req, res, next) => {
+  try {
+    const patent = await patentService.submitForReview(BigInt(req.params.id), req.user);
+
+    sendSuccess(res, 200, toPatentDetailDto(patent));
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.approvePatent = async (req, res, next) => {
+  try {
+    const patent = await patentService.approvePatent(
+      BigInt(req.params.id),
+      { comments: req.body.comments },
+      req.user,
+    );
+
+    sendSuccess(res, 200, toPatentDetailDto(patent));
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.declinePatent = async (req, res, next) => {
+  try {
+    const patent = await patentService.declinePatent(
+      BigInt(req.params.id),
+      { comments: req.body.comments },
+      req.user,
+    );
+
+    sendSuccess(res, 200, toPatentDetailDto(patent));
   } catch (error) {
     next(error);
   }
@@ -80,7 +106,29 @@ exports.updatePatent = async (req, res, next) => {
 
 exports.deletePatent = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'deletePatent not implemented yet', id: req.params.id });
+    await patentService.deletePatent(BigInt(req.params.id), req.user);
+
+    sendSuccess(res, 200, { message: 'Patent deleted' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.listReviews = async (req, res, next) => {
+  try {
+    const reviews = await patentService.listReviews(BigInt(req.params.id), req.user);
+
+    sendSuccess(res, 200, { reviews: reviews.map(toPatentReviewDto) });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.getDocumentUrl = async (req, res, next) => {
+  try {
+    const result = await patentService.getDocumentUrl(BigInt(req.params.id), req.user);
+
+    sendSuccess(res, 200, result);
   } catch (error) {
     next(error);
   }

@@ -19,8 +19,10 @@ const options = {
     },
     servers: [
       {
-        url: 'http://localhost:5000/api',
-        description: 'Local development server',
+        // Driven by env so the docs' "Try it out" button targets whatever host
+        // is actually serving them, rather than always localhost.
+        url: process.env.SWAGGER_SERVER_URL || `http://localhost:${process.env.PORT || 5000}/api`,
+        description: process.env.NODE_ENV === 'production' ? 'Server' : 'Local development server',
       },
     ],
     components: {

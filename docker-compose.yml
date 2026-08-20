@@ -15,6 +15,18 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in your .env}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1d}
       DATABASE_URL: postgresql://${POSTGRES_USER:-patents}:${POSTGRES_PASSWORD:-patents}@postgres:5432/${POSTGRES_DB:-patents}?schema=public
+      # Object storage. The backend only ever signs URLs against this; the
+      # actual bytes go client -> minio directly, never through here.
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-patents}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-admin123123}
+      S3_FORCE_PATH_STYLE: "true"
+      # Present so /ready can report outbox backlog; the API itself never
+      # produces to Kafka - the relay service below does.
+      KAFKA_BROKERS: kafka:9092
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
     ports:
       - "5000:5000"
     volumes:
@@ -29,7 +41,42 @@ services:
       - patents-net
     restart: unless-stopped
 
-  postgres:
+  # The outbox relay: the only thing in this system that produces to Kafka.
+  #
+  # Separate from the API on purpose. Every API replica polling the same table
+  # would be wasteful, and a stalled relay inside the API process would be
+  # invisible in API metrics. SKIP LOCKED makes running several safe.
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patents-relay
+    command: ["npm", "run", "relay"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-patents}:${POSTGRES_PASSWORD:-patents}@postgres:5432/${POSTGRES_DB:-patents}?schema=public
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in your .env}
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-patents}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-admin123123}
+      KAFKA_BROKERS: kafka:9092
+      PATENT_EVENTS_TOPIC: ${PATENT_EVENTS_TOPIC:-patents.events}
+      OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - patents-net
+    restart: unless-stopped
+
+  postgres:
     image: postgres:16-alpine
     container_name: patents-postgres
     # wal_level=logical (plus the sender/slot headroom below) is what lets

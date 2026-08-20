@@ -185,3 +185,49 @@ docker compose down -v             # also drop the network (bind-mounted data su
 
 Kafka Connect's REST API: `http://localhost:8083` (`GET /connectors`, `GET /connector-plugins`,
 etc.). Kafka UI: `http://localhost:8080`.
+
+
+## The outbox relay (what actually publishes today)
+
+Debezium is staged here but **no connector is registered**, and application events do not come
+from CDC. They come from a hand-written relay:
+
+```
+POST /patents/:id/approve
+        │  one transaction
+        ├─▶ PATENT.status = approved
+        ├─▶ PATENT_REVIEW row
+        └─▶ OUTBOX_EVENT row
+                 │
+   npm run relay ┴──▶ Kafka topic "patents.events", key = patent id
+```
+
+**Why a relay and not Debezium, given Debezium is right there?**
+
+Debezium publishes *rows*. A consumer would receive `PATENT` column changes and have to
+reconstruct what business event they represent — and it would need `PATENT_CATEGORY` and
+`PATENT_INVENTOR` streams too, then join them itself, in the right order. The outbox publishes a
+*domain event* that already carries everything a consumer needs (`src/events/patentEvents.js`).
+The database schema stays free to change without breaking consumers, which is the entire value
+of the boundary.
+
+The Debezium setup stays in place because row-level CDC is genuinely useful for other things —
+analytics, audit, replicating to a warehouse. It is just not how `patents.events` is produced.
+
+**Operational properties**
+
+- At-least-once. The relay can publish and then fail to mark the row published, so it re-sends.
+  Consumers must be idempotent on `(patent_id, version)`.
+- `FOR UPDATE SKIP LOCKED` on the claim query, so several relays can run concurrently without
+  publishing the same event twice or blocking each other.
+- A failed publish stops the batch instead of skipping ahead — ordering beats throughput here.
+- The API never connects to Kafka. A broker outage queues events in Postgres; it does not take
+  the API down. `/ready` reports the backlog.
+- Runs as its own container (`relay` in `docker-compose.yml`) so a stall is visible.
+
+## A local-networking trap
+
+Docker publishes ports on `0.0.0.0` — IPv4 only. Node resolves `localhost` to `::1` first. Every
+host-facing URL therefore uses `127.0.0.1`: Postgres on 5433, MinIO on 9000, Kafka on 29092. Using
+`localhost` produces intermittent `ECONNRESET` and connect timeouts that look exactly like flaky
+infrastructure and are not.

@@ -2,7 +2,16 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
-const BCRYPT_COST = 12;
+/**
+ * bcrypt work factor.
+ *
+ * 12 is the production floor — deliberately slow, because slow is the whole
+ * point of a password KDF. Tests override it: a suite that performs dozens of
+ * hashes per file is otherwise dominated by KDF time rather than by anything
+ * it is trying to assert, and a slow suite is a suite that stops being run.
+ * The override is env-gated and never applies outside NODE_ENV=test.
+ */
+const BCRYPT_COST = Number(process.env.BCRYPT_COST) || (process.env.NODE_ENV === 'test' ? 4 : 12);
 
 // bcrypt silently truncates input past 72 bytes, so two different long
 // passwords sharing a 72-byte prefix would authenticate interchangeably.
@@ -73,6 +82,7 @@ const refreshTokenExpiry = () =>
   new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000);
 
 module.exports = {
+  BCRYPT_COST,
   MAX_PASSWORD_BYTES,
   ACCESS_TOKEN_TTL,
   REFRESH_TOKEN_TTL_DAYS,

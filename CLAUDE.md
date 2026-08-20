@@ -2,6 +2,12 @@
 
 Express + Prisma backend for submitting, reviewing, and retrieving patents.
 
+This is the **Patent Management Service**: source of truth for users, patents, and documents.
+It owns Postgres and MinIO and publishes domain events to Kafka via a transactional outbox.
+Embeddings, vector search, similarity scoring, and AI pre-screening are **out of scope** —
+a separate service consumes `patents.events`. `pending_ai` and `ReviewStage.ai_filter` are
+reserved in the schema and deliberately unused in code; don't implement them here.
+
 ## Commit conventions
 
 - **Do not add Claude/AI attribution to commits in any form.** No `Co-Authored-By: Claude`,
@@ -19,13 +25,33 @@ npm run prisma:migrate   # prisma migrate dev
 npm run prisma:generate  # prisma generate (also runs on postinstall)
 npm run prisma:seed      # seed the initial admin from env vars
 npm run prisma:studio    # prisma studio
+npm run relay            # outbox -> Kafka relay (its own process; see Messaging below)
+npm run relay:dev        # same, under nodemon
 npm run connect:register -- <template>   # register/update a Kafka Connect connector, see kafka-connect/README.md
-docker compose up        # backend + postgres (:5433) + minio (:9000/:9001) + kafka (:29092) + kafka-connect (:8083) + kafka-ui (:8080)
+docker compose up        # backend + relay + postgres (:5433) + minio (:9000/:9001) + kafka (:29092) + kafka-connect (:8083) + kafka-ui (:8080)
 ```
+
+**Use `127.0.0.1`, not `localhost`, in host-facing URLs.** Docker publishes on `0.0.0.0`
+(IPv4 only) and Node resolves `localhost` to `::1` first. The symptom is intermittent
+`ECONNRESET` / connect timeouts against Postgres, MinIO, and Kafka that look like flaky
+infrastructure but are not. `.env.example` already uses `127.0.0.1`.
 
 Tests use jest + supertest against a **real** Postgres (`TEST_DATABASE_URL`, a separate DB the
 suite truncates between tests). `npm test` creates that DB and runs migrations on first run;
-Postgres must be up (`docker compose up -d postgres`).
+**Postgres is the only service it needs** — object storage and Kafka are in-memory fakes
+(`tests/fakes.js`), swapped in via `setStorageClient` / `setProducer`. Keep any new external
+dependency injectable the same way; a suite that needs a full compose stack stops being run.
+
+Two harness details that will confuse you if you don't know them:
+
+- **bcrypt cost drops to 4 under `NODE_ENV=test`** (`BCRYPT_COST` in `helpers.js`). At 12 the
+  patent tests spend most of their wall time in the KDF and trip their own timeouts. Assert
+  against `BCRYPT_COST`, never a literal `12`.
+- **`globalSetup` sets `synchronous_commit = off` on the test database.** The Postgres data
+  directory is a bind mount and fsync on Windows/macOS is brutally slow — this took the patent
+  suite from 265s to 25s. Scoped to the test DB only.
+- **New tables must be added to the `TRUNCATE` list in `tests/setup.js`**, which is hardcoded.
+  Forgetting leaks state across tests in ways that are painful to debug.
 
 ## Frontend (`frontend/`)
 
@@ -63,8 +89,8 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
 
 - `src/routes/` — express routers plus the `@openapi` JSDoc blocks that generate the Swagger spec.
 - `src/controllers/` — thin HTTP layer; unwraps req/res, calls a service, maps the result to a
-  DTO. No business logic or Prisma here. (The Users Module is fully implemented; patents,
-  inventors, categories are still `"... not implemented yet"` stubs.)
+  DTO. No business logic or Prisma here. Users, patents, inventors, and categories are all
+  implemented; there are no stubs left.
 - `src/services/` — business logic and all database access.
 - `src/middlewares/auth.js` — `requireAuth` verifies the access token and sets
   `req.user = { userId: BigInt, role }`; `requireRole(...roles)` gates by role. Convenience
@@ -83,6 +109,23 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
 - `src/utils/dto.js` — response mappers. Always map Prisma records through these: they stringify
   BigInt ids and allowlist fields so `passwordHash` can't leak.
 - `src/utils/roles.js` — `ROLES` constants mirroring the Prisma `Role` enum.
+- `src/config/env.js` — all configuration, validated at boot. A missing required value stops
+  the process with the full list of problems. Add new config here, not with bare `process.env`
+  reads scattered through services.
+- `src/config/prisma.js` — Prisma with an **explicit `pg.Pool`**. Handing the adapter a bare
+  connection string multiplexes concurrent queries onto one client, which produces intermittent
+  "Server has closed the connection" failures. `disposeExternalPool: true` ties the pool's
+  lifetime to `$disconnect`.
+- `src/config/storage.js` / `src/config/kafka.js` — S3 client and Kafka producer, each behind a
+  setter so tests can substitute a fake.
+- `src/services/storageService.js` — presigned upload/download. **Documents never pass through
+  this API.**
+- `src/services/outboxService.js`, `src/workers/outboxRelay.js`, `src/relay.js` — the outbox
+  and its relay process.
+- `src/events/patentEvents.js` — the event contract with the Search Service. Treat it as a
+  published interface.
+- `src/middlewares/idempotency.js` — `Idempotency-Key` replay protection on `POST /patents`.
+- `src/middlewares/requestContext.js` — `X-Request-Id` generation/propagation.
 - `src/swagger.js` — builds the spec from `./src/routes/*.js`; served at `/api-docs`.
 - `prisma/seed.js` — idempotent admin seed from `ADMIN_*` env vars (registered in
   `prisma.config.ts`, not `package.json` — Prisma 7).
@@ -111,12 +154,55 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
   the "revoke all sessions" write for a reused token must not sit inside the `$transaction` that
   then throws, or the rollback undoes the revocation. (This was a real bug a test caught.)
 
+## Patents Module conventions
+
+- **Status is never accepted from the client.** The client calls an action
+  (`/submit`, `/approve`, `/decline`) and `patentService` decides whether it is legal from the
+  current state. The table of legal transitions is `TRANSITIONS` in that file.
+- **Visibility is data-scoped.** `requireUser` only proves someone is logged in. Every read
+  goes through `visibilityWhere(user)`; a non-admin sees their own patents plus approved ones.
+  An invisible patent is a **404, not a 403** — a 403 confirms the id exists.
+- **`listPatents` builds its filter with `AND`, not object spread.** `visibilityWhere` and the
+  search filter both produce an `OR`, and spreading them into one object silently drops the
+  visibility rule — which exposes every user's drafts. This was a real bug; don't reintroduce it.
+- **`version` bumps only on content change** (title/abstract/specification/document), never on
+  category or inventor edits. It is half the downstream idempotency key.
+- **Object keys are derived server-side** and namespaced by user id. A client-supplied key is a
+  path-traversal and cross-user-overwrite primitive; `keyBelongsToUser` is the real check.
+- **Upload size is enforced after upload**, in `verifyDocument`. A presigned PUT cannot express
+  a maximum content length.
+- **The S3 client sets `requestChecksumCalculation: 'WHEN_REQUIRED'`.** Since AWS SDK v3.729 the
+  default bakes an `x-amz-checksum-crc32` of an *empty* body into presigned PUT URLs. MinIO
+  tolerates the mismatch; real S3 rejects it.
+
+## Messaging conventions
+
+- **Never publish to Kafka from a request handler.** Handlers write an `OUTBOX_EVENT` row inside
+  the same transaction as the state change; the relay publishes. That is what keeps the API up
+  when the broker is down, and what makes it impossible for an event to diverge from committed
+  data.
+- `outboxService.enqueue(tx, ...)` **takes the transaction client as its first argument** on
+  purpose. Passing the plain `prisma` client is legal JavaScript and a silent correctness bug.
+- **Delivery is at-least-once.** Consumers must be idempotent on `(patent_id, version)`.
+- **Events are keyed by patent id** so all versions of one patent share a partition; Kafka only
+  orders within a partition.
+- **A failed publish stops the batch** rather than skipping ahead. Head-of-line blocking is
+  deliberate — delivering v2 before v1 is worse than delivering late.
+- Only **approval** emits `PatentVersionUpserted`; declining a previously approved patent emits
+  `PatentVersionWithdrawn`. Creating, submitting, and editing emit nothing.
+- **Debezium remains unregistered.** The infra is staged in compose, but the hand-written relay
+  publishes clean *domain* events rather than row-shaped CDC records. Don't wire up a connector
+  without deciding what consumers should see.
+
 ## Known issues
 
-- `PATENT.submitted_by` is `NOT NULL` but its FK is `ON DELETE SET NULL`
-  (`prisma/schema.prisma`). Deleting a user who has patents would raise a runtime FK error.
-  Left as-is by decision: the Users Module has **no account-deletion endpoint**, so this is
-  dormant. Revisit if hard delete is ever added.
+- Orphaned objects: an upload whose `POST /patents` never arrives stays in MinIO forever. No
+  sweeper exists yet.
+- `PATENT.s3_file_url` is superseded by `document_key` and is now nullable and unwritten. Drop
+  it in a later migration.
+- Pagination is offset-based everywhere. Fine at current scale, not at 100k+ rows.
+- `schema.sql` at the repo root is the original hand-written DDL and is **stale** — Prisma
+  migrations are the source of truth.
 - No `isActive` / account-deactivation flag on `User` (considered, deferred). A compromised or
   departing user's account can't be disabled — only their refresh tokens revoked.
 - An old `JWT_SECRET` and `DATABASE_URL` are still present in git history (commit `b767bd7`).

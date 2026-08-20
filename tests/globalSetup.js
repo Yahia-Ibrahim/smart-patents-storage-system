@@ -55,6 +55,21 @@ module.exports = async () => {
     await client.query(`CREATE DATABASE "${dbName.replace(/"/g, '""')}"`);
   }
 
+  /**
+   * The test database is disposable, so it does not need durable commits.
+   *
+   * This matters more than it looks: the Postgres data directory is a bind
+   * mount, and on Windows/macOS that makes fsync brutally slow — the server's
+   * own log shows multi-second checkpoint syncs. With synchronous_commit on,
+   * the suite spends most of its time waiting for the disk rather than
+   * running assertions, and tests start tripping their timeouts.
+   *
+   * Scoped to this one database with ALTER DATABASE, so the dev database keeps
+   * full durability. Losing the test database on a crash costs nothing: the
+   * suite truncates it between every test anyway.
+   */
+  await client.query(`ALTER DATABASE "${dbName.replace(/"/g, '""')}" SET synchronous_commit = off`);
+
   await client.end();
 
   execSync('npx prisma migrate deploy', {

@@ -1,14 +1,22 @@
+const categoryService = require('../services/categoryService');
+const { sendSuccess } = require('../utils/response');
+const { toCategoryDto } = require('../utils/dto');
+
 exports.createCategory = async (req, res, next) => {
   try {
-    res.status(201).json({ message: 'createCategory not implemented yet' });
+    const category = await categoryService.createCategory({ name: req.body.name });
+
+    sendSuccess(res, 201, toCategoryDto(category));
   } catch (error) {
     next(error);
   }
 };
 
-exports.getAllCategories = async (_req, res, next) => {
+exports.getAllCategories = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'getAllCategories not implemented yet' });
+    const categories = await categoryService.listCategories({ search: req.query.search });
+
+    sendSuccess(res, 200, { categories: categories.map(toCategoryDto) });
   } catch (error) {
     next(error);
   }
@@ -16,7 +24,9 @@ exports.getAllCategories = async (_req, res, next) => {
 
 exports.getCategoryById = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'getCategoryById not implemented yet', id: req.params.id });
+    const category = await categoryService.getCategoryById(BigInt(req.params.id));
+
+    sendSuccess(res, 200, toCategoryDto(category));
   } catch (error) {
     next(error);
   }
@@ -24,7 +34,11 @@ exports.getCategoryById = async (req, res, next) => {
 
 exports.updateCategory = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'updateCategory not implemented yet', id: req.params.id });
+    const category = await categoryService.updateCategory(BigInt(req.params.id), {
+      name: req.body.name,
+    });
+
+    sendSuccess(res, 200, toCategoryDto(category));
   } catch (error) {
     next(error);
   }
@@ -32,7 +46,9 @@ exports.updateCategory = async (req, res, next) => {
 
 exports.deleteCategory = async (req, res, next) => {
   try {
-    res.status(200).json({ message: 'deleteCategory not implemented yet', id: req.params.id });
+    await categoryService.deleteCategory(BigInt(req.params.id));
+
+    sendSuccess(res, 200, { message: 'Category deleted' });
   } catch (error) {
     next(error);
   }

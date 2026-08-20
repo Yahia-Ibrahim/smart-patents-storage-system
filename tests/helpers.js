@@ -45,4 +45,92 @@ const login = async (email, password = VALID_PASSWORD) => {
 
 const authHeader = (accessToken) => ({ Authorization: `Bearer ${accessToken}` });
 
-module.exports = { api, app, prisma, createUser, createAdmin, login, authHeader, VALID_PASSWORD, ROLES };
+const { fakeStorage } = require('./fakes');
+
+/**
+ * Walks the real upload flow: ask for a presigned target, then simulate the
+ * client PUTting bytes to it. Returns the documentKey to pass to POST /patents.
+ *
+ * Tests go through the endpoint rather than fabricating a key, because the key
+ * format and the ownership check are part of what is under test.
+ */
+const uploadDocument = async (accessToken, { filename = 'spec.pdf', contentType = 'application/pdf', size = 2048 } = {}) => {
+  const res = await api()
+    .post('/api/patents/uploads')
+    .set(authHeader(accessToken))
+    .send({ filename, contentType });
+
+  if (res.status !== 201) {
+    throw new Error(`upload request failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+
+  fakeStorage.putObject(res.body.data.objectKey, { size, contentType });
+  return res.body.data.objectKey;
+};
+
+const PATENT_BODY = {
+  title: 'A self-cooling beverage container',
+  abstract: 'An apparatus for cooling a beverage container using an endothermic reaction chamber.',
+  specification: 'The invention comprises an inner vessel, an outer shell, and a rupturable membrane separating two reagents which, on mixing, absorb heat from the contents.',
+};
+
+/** Creates a draft patent through the API and returns its DTO. */
+const createDraftPatent = async (accessToken, overrides = {}) => {
+  const documentKey = overrides.documentKey || (await uploadDocument(accessToken));
+  const res = await api()
+    .post('/api/patents')
+    .set(authHeader(accessToken))
+    .send({ ...PATENT_BODY, documentKey, ...overrides });
+
+  if (res.status !== 201) {
+    throw new Error(`patent creation failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+
+  return res.body.data;
+};
+
+/** Draft -> pending_admin -> approved, the full happy path. */
+const approvedPatent = async (userToken, adminToken, overrides = {}) => {
+  const patent = await createDraftPatent(userToken, overrides);
+  await api().post(`/api/patents/${patent.id}/submit`).set(authHeader(userToken)).send();
+  const res = await api()
+    .post(`/api/patents/${patent.id}/approve`)
+    .set(authHeader(adminToken))
+    .send({});
+
+  if (res.status !== 200) {
+    throw new Error(`approval failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+
+  return res.body.data;
+};
+
+const createCategory = (name) => prisma.category.create({ data: { name } });
+
+const createInventor = (overrides = {}) =>
+  prisma.inventor.create({
+    data: {
+      fullName: 'Ada Lovelace',
+      email: 'ada@example.com',
+      organization: 'Analytical Engines Ltd',
+      ...overrides,
+    },
+  });
+
+module.exports = {
+  api,
+  app,
+  prisma,
+  createUser,
+  createAdmin,
+  login,
+  authHeader,
+  uploadDocument,
+  createDraftPatent,
+  approvedPatent,
+  createCategory,
+  createInventor,
+  PATENT_BODY,
+  VALID_PASSWORD,
+  ROLES,
+};

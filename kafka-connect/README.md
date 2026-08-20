@@ -1,5 +1,11 @@
 # Kafka Connect / Debezium connectors
 
+> **Application events do not come from here.** `patents.events` is produced by the
+> transactional outbox relay (`npm run relay`), which publishes clean domain events rather than
+> row-shaped CDC records. See INFRASTRUCTURE.md for why. Debezium remains available for
+> row-level CDC use cases — analytics, audit, warehouse replication — but no connector is
+> registered by default.
+
 This directory holds **connector templates**, not live connectors. Nothing here is registered
 automatically — Kafka Connect starts with zero connectors configured, by design (see
 `INFRASTRUCTURE.md` at the repo root for why).

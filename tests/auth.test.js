@@ -1,4 +1,5 @@
 const { api, prisma, createUser, login, VALID_PASSWORD, ROLES } = require('./helpers');
+const { BCRYPT_COST } = require('../src/utils/helpers');
 
 describe('POST /api/users/signup', () => {
   it('creates a user and returns a token pair', async () => {
@@ -42,7 +43,13 @@ describe('POST /api/users/signup', () => {
     const stored = await prisma.user.findUnique({ where: { email: 'ada@example.com' } });
 
     expect(stored.passwordHash).not.toBe(VALID_PASSWORD);
-    expect(stored.passwordHash).toMatch(/^\$2b\$12\$/);
+    // A bcrypt hash at the configured work factor. Compared against
+    // BCRYPT_COST rather than a literal 12 because tests deliberately run a
+    // cheaper factor; what this asserts is that the password went through
+    // bcrypt at all, not which factor was used.
+    expect(stored.passwordHash.slice(0, 7)).toBe(
+      `$2b$${String(BCRYPT_COST).padStart(2, '0')}$`,
+    );
   });
 
   it('ignores a role supplied by the client and always creates a plain user', async () => {

@@ -83,20 +83,46 @@ model Patent {
   title         String       @db.VarChar(500)
   abstract      String       @db.Text
   specification String       @db.Text
-  s3FileUrl     String       @map("s3_file_url") @db.Text
-  status        PatentStatus @default(pending_ai)
+
+  /// Object-store key of the submitted document, e.g.
+  /// "patents/3/2f1c.../spec.pdf". A key, not a URL: presigned URLs expire,
+  /// so storing one would hand out a reference that is dead within the hour.
+  documentKey   String?      @map("document_key") @db.Text
+
+  /// Superseded by documentKey. Kept nullable so the column can be dropped in
+  /// a later migration without a data-loss step; nothing writes it.
+  s3FileUrl     String?      @map("s3_file_url") @db.Text
+
+  /// Bumped only when the *content* changes (title/abstract/specification/
+  /// document). Category and inventor edits leave it alone: it is half of the
+  /// downstream idempotency key, and churning it forces pointless re-indexing.
+  version       Int          @default(1)
+
+  publicationNumber String?  @unique @map("publication_number") @db.VarChar(64)
+  jurisdiction      String?  @db.VarChar(8)
+
+  status        PatentStatus @default(draft)
   submittedBy   BigInt       @map("submitted_by")
+  submittedAt   DateTime?    @map("submitted_at") @db.Timestamptz
+  reviewedAt    DateTime?    @map("reviewed_at") @db.Timestamptz
   createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz
   updatedAt     DateTime     @updatedAt @map("updated_at") @db.Timestamptz
 
   // Relations
-  submitter  User             @relation("PatentSubmitter", fields: [submittedBy], references: [id], onDelete: SetNull)
+  //
+  // Restrict, not SetNull: submittedBy is NOT NULL, so SET NULL was
+  // unsatisfiable and would have raised an FK error at runtime the first time
+  // anyone deleted a user with patents. Restrict also keeps the audit trail —
+  // you cannot erase who submitted a patent by deleting the account.
+  submitter  User             @relation("PatentSubmitter", fields: [submittedBy], references: [id], onDelete: Restrict)
   reviews    PatentReview[]
   inventors  PatentInventor[]
   categories PatentCategory[]
 
   @@index([status], name: "idx_patent_status")
   @@index([submittedBy], name: "idx_patent_submitted_by")
+  @@index([submittedBy, status], name: "idx_patent_submitter_status")
+  @@index([createdAt], name: "idx_patent_created_at")
   @@map("PATENT")
 }
 
@@ -114,6 +140,7 @@ model PatentReview {
   patent   Patent @relation(fields: [patentId], references: [id], onDelete: Cascade)
   reviewer User?  @relation("Reviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
 
+  @@index([patentId], name: "idx_patent_review_patent")
   @@map("PATENT_REVIEW")
 }
 
@@ -167,4 +194,44 @@ model PatentCategory {
   // Composite Primary Key
   @@id([patentId, categoryId])
   @@map("PATENT_CATEGORY")
+}
+/// Reliable event publication.
+///
+/// A row here is written in the SAME transaction as the state change it
+/// describes, so the event can never diverge from committed data. The relay
+/// (src/workers/outboxRelay.js) publishes unpublished rows to Kafka and marks
+/// them. That split means delivery is at-least-once: the relay can duplicate,
+/// never lose. Consumers must be idempotent on (patentId, version).
+model OutboxEvent {
+  id            BigInt    @id @default(autoincrement())
+  aggregateType String    @map("aggregate_type") @db.VarChar(64)
+  aggregateId   BigInt    @map("aggregate_id")
+  eventType     String    @map("event_type") @db.VarChar(128)
+  payload       Json
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  publishedAt   DateTime? @map("published_at") @db.Timestamptz
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error") @db.Text
+
+  @@index([aggregateType, aggregateId], name: "idx_outbox_aggregate")
+  @@map("OUTBOX_EVENT")
+}
+
+/// Replay protection for mutating requests.
+///
+/// Keyed by (userId, endpoint, key) so one user's key cannot collide with
+/// another's. requestHash lets a same-key-different-body call be rejected as a
+/// 409 rather than silently returning someone else's answer.
+model IdempotencyKey {
+  key            String   @db.VarChar(255)
+  userId         BigInt   @map("user_id")
+  endpoint       String   @db.VarChar(255)
+  requestHash    String   @map("request_hash") @db.VarChar(64)
+  responseStatus Int      @map("response_status")
+  responseBody   Json     @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@id([userId, endpoint, key])
+  @@index([createdAt], name: "idx_idempotency_created")
+  @@map("IDEMPOTENCY_KEY")
 }

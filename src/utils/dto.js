@@ -50,4 +50,92 @@ const toProfileDto = (user) => ({
   inventorProfile: toInventorDto(user.inventorProfile),
 });
 
-module.exports = { toUserDto, toAdminUserDto, toInventorDto, toProfileDto };
+/**
+ * Prisma returns Decimal for DECIMAL columns, and JSON.stringify turns those
+ * into an object rather than a number. PATENT_REVIEW.ai_confidence_score is
+ * the only one in this schema; mapping it here keeps the surprise contained.
+ */
+const decimalToNumber = (value) => (value === null || value === undefined ? null : Number(value));
+
+const toCategoryDto = (category) => ({
+  id: String(category.id),
+  name: category.name,
+});
+
+/** Inventor with its optional linked account, for the inventors endpoints. */
+const toInventorDetailDto = (inventor) => ({
+  ...toInventorDto(inventor),
+  linkedUser: inventor.user
+    ? { id: String(inventor.user.id), name: inventor.user.name, email: inventor.user.email }
+    : null,
+  createdAt: inventor.createdAt,
+});
+
+const toPatentInventorDto = (link) => ({
+  ...toInventorDto(link.inventor),
+  order: link.inventorOrder,
+});
+
+/**
+ * List shape. Deliberately omits `specification`: it is the largest field on
+ * the record, and a 20-item page carrying twenty full patent bodies is a
+ * response nobody asked for.
+ */
+const toPatentDto = (patent) => ({
+  id: String(patent.id),
+  title: patent.title,
+  abstract: patent.abstract,
+  status: patent.status,
+  version: patent.version,
+  publicationNumber: patent.publicationNumber,
+  jurisdiction: patent.jurisdiction,
+  submittedBy: String(patent.submittedBy),
+  submitter: patent.submitter
+    ? { id: String(patent.submitter.id), name: patent.submitter.name, email: patent.submitter.email }
+    : undefined,
+  categories: (patent.categories || []).map((link) => toCategoryDto(link.category)),
+  inventors: (patent.inventors || []).map(toPatentInventorDto),
+  hasDocument: Boolean(patent.documentKey),
+  submittedAt: patent.submittedAt,
+  reviewedAt: patent.reviewedAt,
+  createdAt: patent.createdAt,
+  updatedAt: patent.updatedAt,
+});
+
+/**
+ * Detail shape. Adds the full specification and the object key.
+ *
+ * `documentKey` is safe to expose to a caller who can already see the patent:
+ * it is unguessable and useless on its own — reading the object still requires
+ * a presigned URL from GET /patents/:id/document.
+ */
+const toPatentDetailDto = (patent) => ({
+  ...toPatentDto(patent),
+  specification: patent.specification,
+  documentKey: patent.documentKey,
+});
+
+const toPatentReviewDto = (review) => ({
+  id: String(review.id),
+  patentId: String(review.patentId),
+  stage: review.reviewStage,
+  decision: review.decision,
+  aiConfidenceScore: decimalToNumber(review.aiConfidenceScore),
+  comments: review.comments,
+  reviewer: review.reviewer
+    ? { id: String(review.reviewer.id), name: review.reviewer.name, email: review.reviewer.email }
+    : null,
+  createdAt: review.createdAt,
+});
+
+module.exports = {
+  toUserDto,
+  toAdminUserDto,
+  toInventorDto,
+  toProfileDto,
+  toCategoryDto,
+  toInventorDetailDto,
+  toPatentDto,
+  toPatentDetailDto,
+  toPatentReviewDto,
+};
