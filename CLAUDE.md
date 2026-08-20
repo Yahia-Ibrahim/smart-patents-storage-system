@@ -166,7 +166,19 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
   search filter both produce an `OR`, and spreading them into one object silently drops the
   visibility rule — which exposes every user's drafts. This was a real bug; don't reintroduce it.
 - **`version` bumps only on content change** (title/abstract/specification/document), never on
-  category or inventor edits. It is half the downstream idempotency key.
+  category or inventor edits. It identifies content, and is deliberately *not* a dedup key on
+  its own — see `sequence` under Messaging.
+- **Every status transition is applied conditionally inside its transaction**
+  (`applyTransition`), with the expected statuses in the WHERE clause. Reading the status and
+  then writing unconditionally is check-then-act: two concurrent approvals both pass the read
+  and both commit.
+- **`documentKey` is unique.** Two patents sharing one makes deletion unsafe — deleting a draft
+  would destroy the object an approved patent still points at.
+- **Emails are viewer-scoped in DTOs** (`canSeeEmailOf`): an address goes out only to an admin
+  or its owner. Any signed-up user can read approved patents and search the inventor directory,
+  so unconditional emails would publish the whole user/admin directory.
+- **`GET /patents/:id/reviews` is owner-or-admin**, not merely "can see the patent" — review
+  comments are internal notes and name the reviewing admin.
 - **Object keys are derived server-side** and namespaced by user id. A client-supplied key is a
   path-traversal and cross-user-overwrite primitive; `keyBelongsToUser` is the real check.
 - **Upload size is enforced after upload**, in `verifyDocument`. A presigned PUT cannot express
@@ -187,7 +199,18 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
 - **Events are keyed by patent id** so all versions of one patent share a partition; Kafka only
   orders within a partition.
 - **A failed publish stops the batch** rather than skipping ahead. Head-of-line blocking is
-  deliberate — delivering v2 before v1 is worse than delivering late.
+  deliberate — delivering v2 before v1 is worse than delivering late. The escape hatch is
+  `OUTBOX_MAX_ATTEMPTS`: past that, a row is dead-lettered (excluded from claiming) so one
+  poisonous event cannot wedge the queue forever. `/ready` reports the count.
+- **Publishing happens outside any database transaction.** A Kafka round trip inside one blows
+  Prisma's 5s interactive-transaction timeout on a slow broker, and the abort rolls back the
+  mark-published writes for events already sent — an unbounded duplicate loop. Rows are claimed
+  with `claimed_at` in a short committed statement instead.
+- **Run exactly one relay.** Claiming stops two relays doing the same work, but it does not
+  preserve ordering across them: relay B can publish v2 while relay A is still on v1.
+- **The relay stamps `sequence` (the outbox row id) onto every payload at publish time.**
+  `(patent_id, version)` is not a safe dedup key on its own — approve → decline → re-approve
+  repeats the same version — so consumers should order by `sequence` and dedup on `event_id`.
 - Only **approval** emits `PatentVersionUpserted`; declining a previously approved patent emits
   `PatentVersionWithdrawn`. Creating, submitting, and editing emit nothing.
 - **Debezium remains unregistered.** The infra is staged in compose, but the hand-written relay
@@ -201,8 +224,9 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
 - `PATENT.s3_file_url` is superseded by `document_key` and is now nullable and unwritten. Drop
   it in a later migration.
 - Pagination is offset-based everywhere. Fine at current scale, not at 100k+ rows.
-- `schema.sql` at the repo root is the original hand-written DDL and is **stale** — Prisma
-  migrations are the source of truth.
+- `IDEMPOTENCY_KEY` grows forever; no retention job exists.
+- An upload whose `POST /patents` never arrives stays in storage forever; no sweeper exists.
+  (Replacing a document *does* delete the old object, and deleting a draft deletes its own.)
 - No `isActive` / account-deactivation flag on `User` (considered, deferred). A compromised or
   departing user's account can't be disabled — only their refresh tokens revoked.
 - An old `JWT_SECRET` and `DATABASE_URL` are still present in git history (commit `b767bd7`).

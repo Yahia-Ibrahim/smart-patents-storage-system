@@ -145,8 +145,23 @@ const listUsersValidation = [
   handleValidationErrors,
 ];
 
+/**
+ * Ids are Postgres BIGINT. `/^\d+$/` alone accepts a 40-digit number, which
+ * BigInt() happily parses and the driver then rejects at the wire — surfacing
+ * as a 500 for what is plainly a bad request. Bounding it here keeps that a 400.
+ */
+const MAX_BIGINT = 9223372036854775807n;
+
+const isBigIntId = (value) => {
+  if (!/^\d{1,19}$/.test(String(value))) return false;
+  return BigInt(value) > 0n && BigInt(value) <= MAX_BIGINT;
+};
+
 const idParamValidation = [
-  param('id').matches(/^\d+$/).withMessage('Id must be a positive integer'),
+  param('id').custom((value) => {
+    if (!isBigIntId(value)) throw new Error('Id must be a positive integer');
+    return true;
+  }),
   handleValidationErrors,
 ];
 
@@ -212,7 +227,7 @@ const categoryIdsField = (chain) =>
     .withMessage('categoryIds must be an array of at most 20 ids')
     .bail()
     .custom((values) => {
-      if (values.some((value) => !/^\d+$/.test(String(value)))) {
+      if (values.some((value) => !isBigIntId(value))) {
         throw new Error('categoryIds must contain positive integers');
       }
       return true;
@@ -228,7 +243,7 @@ const inventorsField = (chain) =>
         if (!entry || typeof entry !== 'object') {
           throw new Error(`inventors[${index}] must be an object`);
         }
-        if (!/^\d+$/.test(String(entry.inventorId))) {
+        if (!isBigIntId(entry.inventorId)) {
           throw new Error(`inventors[${index}].inventorId must be a positive integer`);
         }
         if (entry.order !== undefined && !Number.isInteger(entry.order)) {
@@ -254,8 +269,8 @@ const createPatentValidation = [
   longTextField(body('abstract'), 'Abstract', 10000),
   longTextField(body('specification'), 'Specification', 200000),
   documentKeyField(body('documentKey')),
-  publicationNumberField(body('publicationNumber').optional({ values: 'falsy' })),
-  jurisdictionField(body('jurisdiction').optional({ values: 'falsy' })),
+  publicationNumberField(body('publicationNumber').optional({ values: 'null' })),
+  jurisdictionField(body('jurisdiction').optional({ values: 'null' })),
   categoryIdsField(body('categoryIds').optional()),
   inventorsField(body('inventors').optional()),
   handleValidationErrors,
@@ -266,8 +281,8 @@ const updatePatentValidation = [
   longTextField(body('abstract').optional(), 'Abstract', 10000),
   longTextField(body('specification').optional(), 'Specification', 200000),
   documentKeyField(body('documentKey').optional()),
-  publicationNumberField(body('publicationNumber').optional({ values: 'falsy' })),
-  jurisdictionField(body('jurisdiction').optional({ values: 'falsy' })),
+  publicationNumberField(body('publicationNumber').optional({ values: 'null' })),
+  jurisdictionField(body('jurisdiction').optional({ values: 'null' })),
   categoryIdsField(body('categoryIds').optional()),
   inventorsField(body('inventors').optional()),
   body().custom((value) => {
@@ -290,7 +305,7 @@ const updatePatentValidation = [
 ];
 
 const approvePatentValidation = [
-  body('comments').optional({ values: 'falsy' }).isString().trim().isLength({ max: 5000 }),
+  body('comments').optional({ values: 'null' }).isString().trim().isLength({ max: 5000 }),
   handleValidationErrors,
 ];
 
@@ -318,12 +333,16 @@ const listPatentsValidation = [
     .withMessage('Unknown status'),
   query('categoryId')
     .optional({ values: 'falsy' })
-    .matches(/^\d+$/)
-    .withMessage('categoryId must be a positive integer'),
+    .custom((value) => {
+      if (!isBigIntId(value)) throw new Error('categoryId must be a positive integer');
+      return true;
+    }),
   query('submittedBy')
     .optional({ values: 'falsy' })
-    .matches(/^\d+$/)
-    .withMessage('submittedBy must be a positive integer'),
+    .custom((value) => {
+      if (!isBigIntId(value)) throw new Error('submittedBy must be a positive integer');
+      return true;
+    }),
   query('jurisdiction')
     .optional({ values: 'falsy' })
     .isString()
@@ -357,7 +376,7 @@ const listCategoriesValidation = [
 const createInventorValidation = [
   nameField('fullName'),
   emailField(),
-  body('organization').optional({ values: 'falsy' }).isString().trim().isLength({ max: 255 }),
+  body('organization').optional({ values: 'null' }).isString().trim().isLength({ max: 255 }),
   body('linkToMe').optional().isBoolean().withMessage('linkToMe must be a boolean').toBoolean(),
   handleValidationErrors,
 ];
@@ -365,7 +384,7 @@ const createInventorValidation = [
 const updateInventorValidation = [
   nameField('fullName').optional(),
   emailField().optional(),
-  body('organization').optional({ values: 'falsy' }).isString().trim().isLength({ max: 255 }),
+  body('organization').optional({ values: 'null' }).isString().trim().isLength({ max: 255 }),
   body().custom((value) => {
     if (
       !value ||
@@ -395,6 +414,7 @@ const searchValidation = [
 
 module.exports = {
   handleValidationErrors,
+  isBigIntId,
   signupValidation,
   loginValidation,
   refreshValidation,

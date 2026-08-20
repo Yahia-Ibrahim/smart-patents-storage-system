@@ -89,16 +89,47 @@ const findOwnedPatent = async (id, user) => {
   return patent;
 };
 
+const transitionConflict = (action, status) =>
+  conflict(
+    `Cannot ${action} a patent with status "${status}"; expected one of: ${TRANSITIONS[action].from.join(', ')}`,
+  );
+
 const assertTransition = (patent, action) => {
   const rule = TRANSITIONS[action];
 
-  if (!rule.from.includes(patent.status)) {
-    throw conflict(
-      `Cannot ${action} a patent with status "${patent.status}"; expected one of: ${rule.from.join(', ')}`,
-    );
-  }
+  if (!rule.from.includes(patent.status)) throw transitionConflict(action, patent.status);
 
   return rule.to;
+};
+
+/**
+ * Applies a state transition *conditionally, inside the transaction*.
+ *
+ * Checking the status with a read and then writing unconditionally is
+ * check-then-act: two admins approving the same patent concurrently both read
+ * `pending_admin`, both pass the check, and both commit — producing two review
+ * rows and two identical events. Worse, a concurrent approve and decline both
+ * commit, and the outbox then holds an Upserted and a Withdrawn whose order
+ * need not match the final stored status, so the corpus disagrees with the
+ * source of truth permanently.
+ *
+ * Putting the status in the WHERE clause makes the database the arbiter: the
+ * loser matches zero rows and is rejected.
+ */
+const applyTransition = async (tx, id, action, data) => {
+  const rule = TRANSITIONS[action];
+
+  const { count } = await tx.patent.updateMany({
+    where: { id, status: { in: rule.from } },
+    data: { status: rule.to, ...data },
+  });
+
+  if (count === 0) {
+    const current = await tx.patent.findUnique({ where: { id }, select: { status: true } });
+    throw transitionConflict(action, current ? current.status : 'unknown');
+  }
+
+  return tx.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
 };
 
 /**
@@ -109,9 +140,22 @@ const assertTransition = (patent, action) => {
  * presigned PUT cannot express a maximum content length on its own — the only
  * reliable moment to enforce it is after the upload, before the row is written.
  */
-const verifyDocument = async (objectKey, userId) => {
+const verifyDocument = async (objectKey, userId, { allowPatentId = null } = {}) => {
   if (!storageService.keyBelongsToUser(objectKey, userId)) {
     throw badRequest('documentKey was not issued to you; request one from POST /patents/uploads');
+  }
+
+  // One document, one patent. Two patents sharing a key would make deletion
+  // unsafe: deleting the draft would destroy the object the approved patent
+  // still points at. The column is unique, but checking here turns a raw
+  // constraint violation into an explanatory 409.
+  const attached = await prisma.patent.findUnique({
+    where: { documentKey: objectKey },
+    select: { id: true },
+  });
+
+  if (attached && attached.id !== allowPatentId) {
+    throw conflict('That document is already attached to another patent');
   }
 
   const head = await storageService.headObject(objectKey);
@@ -275,8 +319,11 @@ const updatePatent = async (id, updates, user) => {
     throw conflict(`A patent with status "${patent.status}" cannot be edited`);
   }
 
+  // Verified against the *caller*, not the submitter: an admin editing someone
+  // else's patent uploads under their own id, so checking the submitter's
+  // namespace would reject every admin document replacement.
   if (updates.documentKey && updates.documentKey !== patent.documentKey) {
-    await verifyDocument(updates.documentKey, patent.submittedBy);
+    await verifyDocument(updates.documentKey, user.userId, { allowPatentId: id });
   }
 
   if (updates.publicationNumber && updates.publicationNumber !== patent.publicationNumber) {
@@ -302,7 +349,23 @@ const updatePatent = async (id, updates, user) => {
     if (updates[field] !== undefined) scalar[field] = updates[field];
   }
 
-  return prisma.$transaction(async (tx) => {
+  const replacedKey =
+    updates.documentKey && updates.documentKey !== patent.documentKey ? patent.documentKey : null;
+
+  const updated = await prisma.$transaction(async (tx) => {
+    // Re-assert editability inside the transaction. Without the status in the
+    // WHERE clause an edit could land on a patent that was submitted for review
+    // a millisecond earlier, silently mutating something under review.
+    const { count } = await tx.patent.updateMany({
+      where: { id, status: { in: [STATUS.DRAFT, STATUS.DECLINED] } },
+      data: { ...scalar, ...(contentChanged ? { version: { increment: 1 } } : {}) },
+    });
+
+    if (count === 0) {
+      const current = await tx.patent.findUnique({ where: { id }, select: { status: true } });
+      throw conflict(`A patent with status "${current?.status}" cannot be edited`);
+    }
+
     if (categoryIds) {
       await tx.patentCategory.deleteMany({ where: { patentId: id } });
       await tx.patentCategory.createMany({
@@ -317,27 +380,27 @@ const updatePatent = async (id, updates, user) => {
       });
     }
 
-    return tx.patent.update({
-      where: { id },
-      data: { ...scalar, ...(contentChanged ? { version: { increment: 1 } } : {}) },
-      include: PATENT_INCLUDE,
-    });
+    return tx.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
   });
+
+  // Only after the row is committed: the old object is unreferenced now, and
+  // leaving it would accumulate one orphan per document replacement.
+  if (replacedKey) await storageService.deleteObject(replacedKey);
+
+  return updated;
 };
 
 const submitForReview = async (id, user) => {
   const patent = await findOwnedPatent(id, user);
-  const to = assertTransition(patent, 'submit');
+  assertTransition(patent, 'submit');
 
   if (!patent.documentKey) {
     throw badRequest('A patent cannot be submitted without an uploaded document');
   }
 
-  return prisma.patent.update({
-    where: { id },
-    data: { status: to, submittedAt: new Date() },
-    include: PATENT_INCLUDE,
-  });
+  return prisma.$transaction((tx) =>
+    applyTransition(tx, id, 'submit', { submittedAt: new Date() }),
+  );
 };
 
 /**
@@ -349,14 +412,10 @@ const approvePatent = async (id, { comments }, admin) => {
   const patent = await prisma.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
   if (!patent) throw notFound('Patent not found');
 
-  const to = assertTransition(patent, 'approve');
+  assertTransition(patent, 'approve');
 
   return prisma.$transaction(async (tx) => {
-    const updated = await tx.patent.update({
-      where: { id },
-      data: { status: to, reviewedAt: new Date() },
-      include: PATENT_INCLUDE,
-    });
+    const updated = await applyTransition(tx, id, 'approve', { reviewedAt: new Date() });
 
     await tx.patentReview.create({
       data: {
@@ -388,15 +447,16 @@ const declinePatent = async (id, { comments }, admin) => {
   const patent = await prisma.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
   if (!patent) throw notFound('Patent not found');
 
-  const to = assertTransition(patent, 'decline');
-  const wasApproved = patent.status === STATUS.APPROVED;
+  assertTransition(patent, 'decline');
 
   return prisma.$transaction(async (tx) => {
-    const updated = await tx.patent.update({
-      where: { id },
-      data: { status: to, reviewedAt: new Date() },
-      include: PATENT_INCLUDE,
-    });
+    // Re-read inside the transaction: whether this decline withdraws the patent
+    // from the corpus depends on the status it actually had when the write
+    // landed, not on what a read before the transaction happened to see.
+    const before = await tx.patent.findUnique({ where: { id }, select: { status: true } });
+    const wasApproved = before?.status === STATUS.APPROVED;
+
+    const updated = await applyTransition(tx, id, 'decline', { reviewedAt: new Date() });
 
     await tx.patentReview.create({
       data: {
@@ -432,12 +492,31 @@ const deletePatent = async (id, user) => {
     throw conflict(`Only a draft can be deleted; this patent is "${patent.status}"`);
   }
 
-  await prisma.patent.delete({ where: { id } });
+  await prisma.$transaction(async (tx) => {
+    // Status in the WHERE clause, so a delete cannot race a submit and remove
+    // a patent that is already under review.
+    const { count } = await tx.patent.deleteMany({ where: { id, status: STATUS.DRAFT } });
+
+    if (count === 0) {
+      const current = await tx.patent.findUnique({ where: { id }, select: { status: true } });
+      throw conflict(`Only a draft can be deleted; this patent is "${current?.status}"`);
+    }
+  });
+
+  // Safe to remove now: documentKey is unique, so no other patent can be
+  // pointing at this object.
   await storageService.deleteObject(patent.documentKey);
 };
 
+/**
+ * Review history is owner-or-admin, not "anyone who can see the patent".
+ *
+ * Comments are internal examiner notes and each row names the reviewing admin.
+ * Gating on visibility alone would publish both to every signed-up user the
+ * moment a patent is approved.
+ */
 const listReviews = async (id, user) => {
-  await findVisiblePatent(id, user);
+  await findOwnedPatent(id, user);
 
   return prisma.patentReview.findMany({
     where: { patentId: id },

@@ -22,7 +22,7 @@ exports.createPatent = async (req, res, next) => {
   try {
     const patent = await patentService.createPatent(req.body, req.user);
 
-    sendSuccess(res, 201, toPatentDetailDto(patent));
+    sendSuccess(res, 201, toPatentDetailDto(patent, req.user));
   } catch (error) {
     next(error);
   }
@@ -33,7 +33,7 @@ exports.listPatents = async (req, res, next) => {
     const result = await patentService.listPatents(req.query, req.user);
 
     sendSuccess(res, 200, {
-      patents: result.patents.map(toPatentDto),
+      patents: result.patents.map((patent) => toPatentDto(patent, req.user)),
       pagination: {
         total: result.total,
         page: result.page,
@@ -50,7 +50,7 @@ exports.getPatentById = async (req, res, next) => {
   try {
     const patent = await patentService.getPatentById(BigInt(req.params.id), req.user);
 
-    sendSuccess(res, 200, toPatentDetailDto(patent));
+    sendSuccess(res, 200, toPatentDetailDto(patent, req.user));
   } catch (error) {
     next(error);
   }
@@ -60,7 +60,7 @@ exports.updatePatent = async (req, res, next) => {
   try {
     const patent = await patentService.updatePatent(BigInt(req.params.id), req.body, req.user);
 
-    sendSuccess(res, 200, toPatentDetailDto(patent));
+    sendSuccess(res, 200, toPatentDetailDto(patent, req.user));
   } catch (error) {
     next(error);
   }
@@ -70,7 +70,7 @@ exports.submitPatent = async (req, res, next) => {
   try {
     const patent = await patentService.submitForReview(BigInt(req.params.id), req.user);
 
-    sendSuccess(res, 200, toPatentDetailDto(patent));
+    sendSuccess(res, 200, toPatentDetailDto(patent, req.user));
   } catch (error) {
     next(error);
   }
@@ -84,7 +84,7 @@ exports.approvePatent = async (req, res, next) => {
       req.user,
     );
 
-    sendSuccess(res, 200, toPatentDetailDto(patent));
+    sendSuccess(res, 200, toPatentDetailDto(patent, req.user));
   } catch (error) {
     next(error);
   }
@@ -98,7 +98,7 @@ exports.declinePatent = async (req, res, next) => {
       req.user,
     );
 
-    sendSuccess(res, 200, toPatentDetailDto(patent));
+    sendSuccess(res, 200, toPatentDetailDto(patent, req.user));
   } catch (error) {
     next(error);
   }
@@ -118,7 +118,7 @@ exports.listReviews = async (req, res, next) => {
   try {
     const reviews = await patentService.listReviews(BigInt(req.params.id), req.user);
 
-    sendSuccess(res, 200, { reviews: reviews.map(toPatentReviewDto) });
+    sendSuccess(res, 200, { reviews: reviews.map((review) => toPatentReviewDto(review, req.user)) });
   } catch (error) {
     next(error);
   }

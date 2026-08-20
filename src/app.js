@@ -62,30 +62,40 @@ app.get('/health', (_req, res) => {
  * that decoupling is the whole point of the outbox. The backlog is reported
  * for visibility instead.
  */
-app.get('/ready', async (_req, res) => {
+app.get('/ready', async (req, res) => {
   const checks = {};
   let healthy = true;
 
-  try {
+  // The probe is unauthenticated, so it reports status only. Driver error
+  // messages carry hosts, ports, database names, bucket names and sometimes a
+  // credential id; those go to the log, keyed by request id, not to the caller.
+  const check = async (name, fn) => {
+    try {
+      checks[name] = (await fn()) ?? 'ok';
+    } catch (error) {
+      console.error(`[ready] ${name} check failed (request ${req.id}):`, error.message);
+      checks[name] = 'error';
+      healthy = false;
+    }
+  };
+
+  await check('database', async () => {
     await prisma.$queryRaw`SELECT 1`;
-    checks.database = 'ok';
-  } catch (error) {
-    checks.database = `error: ${error.message}`;
-    healthy = false;
-  }
-
-  try {
+    return 'ok';
+  });
+  await check('storage', async () => {
     await storageService.checkHealth();
-    checks.storage = 'ok';
-  } catch (error) {
-    checks.storage = `error: ${error.message}`;
-    healthy = false;
-  }
+    return 'ok';
+  });
 
+  // Backlog is reported but never fails the probe: events queueing up is the
+  // outbox working as designed while the broker is away, not a reason to pull
+  // this instance out of rotation.
   try {
     checks.outbox = await outboxService.stats();
   } catch (error) {
-    checks.outbox = `error: ${error.message}`;
+    console.error(`[ready] outbox stats failed (request ${req.id}):`, error.message);
+    checks.outbox = 'error';
   }
 
   res.status(healthy ? 200 : 503).json({ status: healthy ? 'ready' : 'degraded', checks });

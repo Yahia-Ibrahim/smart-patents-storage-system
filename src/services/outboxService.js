@@ -1,4 +1,5 @@
 const prisma = require('../config/prisma');
+const config = require('../config/env');
 
 /**
  * The transactional outbox.
@@ -27,46 +28,87 @@ const enqueue = (tx, { aggregateType, aggregateId, eventType, payload }) =>
   });
 
 /**
- * Claims a batch of unpublished events for one relay pass.
- *
- * `FOR UPDATE SKIP LOCKED` is what makes it safe to run more than one relay
- * process: each pass locks its own rows and skips rows another relay is
- * already holding, so no event is published twice by concurrent relays and
- * neither process blocks the other.
- *
- * `ORDER BY id` preserves publication order within a patent, which matters
- * because consumers apply versions in sequence.
+ * How long a claim is honoured before another relay may take the row back.
+ * Generous relative to a publish, so a slow broker does not cause two relays
+ * to publish the same event; short enough that a crashed relay's backlog
+ * drains without operator action.
  */
-const claimBatch = (tx, batchSize) =>
-  tx.$queryRawUnsafe(
-    `SELECT id, aggregate_type, aggregate_id, event_type, payload, attempts
-       FROM "OUTBOX_EVENT"
-      WHERE published_at IS NULL
-      ORDER BY id
-      LIMIT ${Number(batchSize)}
-      FOR UPDATE SKIP LOCKED`,
-  );
+const CLAIM_TIMEOUT_MS = 5 * 60 * 1000;
 
-const markPublished = (tx, id) =>
-  tx.outboxEvent.update({ where: { id }, data: { publishedAt: new Date(), lastError: null } });
+/**
+ * Atomically takes ownership of the next batch of unpublished events.
+ *
+ * This is a single `UPDATE ... RETURNING` over a `SELECT ... FOR UPDATE SKIP
+ * LOCKED` subquery, and it commits on its own. That matters: publishing must
+ * happen *outside* any database transaction, because a Kafka round trip held
+ * inside one blows through Prisma's 5s interactive-transaction timeout under a
+ * degraded broker — and when that transaction aborts, it rolls back the
+ * mark-published writes for events that were already sent, so the next pass
+ * re-sends them. That is an unbounded duplicate loop, not at-least-once noise.
+ *
+ * `SKIP LOCKED` keeps two relays from grabbing the same rows in the instant
+ * this statement runs; `claimed_at` is what keeps them apart afterwards, once
+ * the row lock is gone.
+ *
+ * Rows that have failed `OUTBOX_MAX_ATTEMPTS` times are excluded, which is what
+ * lets the queue drain past a permanently poisonous event instead of retrying
+ * it forever. See `deadLettered` in `stats()`.
+ */
+const claimBatch = async (batchSize) => {
+  const staleBefore = new Date(Date.now() - CLAIM_TIMEOUT_MS);
 
-const markFailed = (tx, id, error) =>
-  tx.outboxEvent.update({
+  return prisma.$queryRaw`
+    UPDATE "OUTBOX_EVENT"
+       SET claimed_at = NOW()
+     WHERE id IN (
+       SELECT id
+         FROM "OUTBOX_EVENT"
+        WHERE published_at IS NULL
+          AND attempts < ${config.outbox.maxAttempts}
+          AND (claimed_at IS NULL OR claimed_at < ${staleBefore})
+        ORDER BY id
+        LIMIT ${Number(batchSize)}
+        FOR UPDATE SKIP LOCKED
+     )
+    RETURNING id, aggregate_type, aggregate_id, event_type, payload, attempts`;
+};
+
+const markPublished = (id) =>
+  prisma.outboxEvent.update({
     where: { id },
-    data: { attempts: { increment: 1 }, lastError: String(error).slice(0, 2000) },
+    data: { publishedAt: new Date(), lastError: null, claimedAt: null },
   });
 
-/** Backlog stats, used by the readiness probe and by operators. */
+/**
+ * Releases the claim so the row is retried on a later pass, and records why.
+ * Clearing `claimed_at` matters: leaving it set would make the row wait out
+ * the full claim timeout before anyone retried it.
+ */
+const markFailed = (id, error) =>
+  prisma.outboxEvent.update({
+    where: { id },
+    data: {
+      attempts: { increment: 1 },
+      lastError: String(error).slice(0, 2000),
+      claimedAt: null,
+    },
+  });
+
+/**
+ * Backlog stats for the readiness probe and for operators.
+ *
+ * `deadLettered` is the number that needs a human: those events will never be
+ * published, and whatever they described is missing downstream.
+ */
 const stats = async () => {
-  // One round trip rather than two counts: the readiness probe is called
-  // often, and both numbers come from the same scan of the unpublished rows.
   const [row] = await prisma.$queryRaw`
     SELECT COUNT(*)::int AS pending,
-           COUNT(*) FILTER (WHERE attempts >= 5)::int AS stuck
+           COUNT(*) FILTER (WHERE attempts > 0)::int AS retrying,
+           COUNT(*) FILTER (WHERE attempts >= ${config.outbox.maxAttempts})::int AS "deadLettered"
       FROM "OUTBOX_EVENT"
      WHERE published_at IS NULL`;
 
-  return { pending: row.pending, stuck: row.stuck };
+  return row;
 };
 
-module.exports = { enqueue, claimBatch, markPublished, markFailed, stats };
+module.exports = { CLAIM_TIMEOUT_MS, enqueue, claimBatch, markPublished, markFailed, stats };

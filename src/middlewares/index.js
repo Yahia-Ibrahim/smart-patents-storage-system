@@ -33,7 +33,12 @@ exports.errorHandler = (err, _req, res, _next) => {
   // safe (utils/errors.js) or deliberately mapped above are forwarded.
   const isSafeToExpose = mapped || err.expose === true;
   const message = isSafeToExpose ? mapped?.message || err.message : 'Internal Server Error';
-  const code = mapped?.code || err.code || (status === 500 ? 'INTERNAL_ERROR' : 'ERROR');
+  // err.code is only forwarded when the error is safe to expose. An unmapped
+  // Prisma error would otherwise leak its code (P2000, P2011, ...) in the body
+  // of an otherwise-generic 500, telling the caller which constraint they hit.
+  const code = isSafeToExpose
+    ? mapped?.code || err.code || (status === 500 ? 'INTERNAL_ERROR' : 'ERROR')
+    : 'INTERNAL_ERROR';
 
   if (status >= 500 && process.env.NODE_ENV !== 'test') {
     console.error(err);

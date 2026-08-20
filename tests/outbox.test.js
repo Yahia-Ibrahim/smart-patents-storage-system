@@ -11,7 +11,7 @@ const {
   createInventor,
 } = require('./helpers');
 const { fakeProducer } = require('./fakes');
-const { publishBatch } = require('../src/workers/outboxRelay');
+const { publishBatch, MAX_PAYLOAD_BYTES } = require('../src/workers/outboxRelay');
 const outboxService = require('../src/services/outboxService');
 
 const setup = async () => {
@@ -208,6 +208,9 @@ describe('outbox relay', () => {
     expect(event.publishedAt).toBeNull();
     expect(event.attempts).toBe(1);
     expect(event.lastError).toMatch(/simulated broker failure/);
+    // The claim is released, so the next pass retries immediately rather than
+    // waiting out the claim timeout.
+    expect(event.claimedAt).toBeNull();
   });
 
   it('retries a previously failed event on the next pass', async () => {
@@ -258,10 +261,142 @@ describe('outbox stats', () => {
     const { token, adminToken } = await setup();
     await approvedPatent(token, adminToken);
 
-    expect(await outboxService.stats()).toEqual({ pending: 1, stuck: 0 });
+    expect(await outboxService.stats()).toEqual({ pending: 1, retrying: 0, deadLettered: 0 });
 
     await publishBatch();
 
-    expect(await outboxService.stats()).toEqual({ pending: 0, stuck: 0 });
+    expect(await outboxService.stats()).toEqual({ pending: 0, retrying: 0, deadLettered: 0 });
+  });
+});
+
+/**
+ * Regression coverage for the failure modes an external review found. Each of
+ * these passed before the fix only because nothing exercised the path.
+ */
+describe('outbox relay: failure modes', () => {
+  /**
+   * Publishing used to happen inside a Prisma interactive transaction. A
+   * mid-batch failure rolled back the markPublished writes of events that had
+   * already reached Kafka, so the next pass re-sent them — an unbounded
+   * duplicate loop rather than at-least-once redelivery. Failing the *second*
+   * event is what exercises that; failing the first never did.
+   */
+  it('keeps earlier successes when a later event in the batch fails', async () => {
+    const { token, adminToken } = await setup();
+    await approvedPatent(token, adminToken);
+    await approvedPatent(token, adminToken, { publicationNumber: 'US4444444' });
+    await approvedPatent(token, adminToken, { publicationNumber: 'US5555555' });
+
+    // Let the first through, fail the second.
+    const realSend = fakeProducer.send.bind(fakeProducer);
+    let calls = 0;
+    fakeProducer.send = async (payload) => {
+      calls += 1;
+      if (calls === 2) throw new Error('simulated broker failure');
+      return realSend(payload);
+    };
+
+    const result = await publishBatch();
+    fakeProducer.send = realSend;
+
+    expect(result.published).toBe(1);
+
+    const events = await prisma.outboxEvent.findMany({ orderBy: { id: 'asc' } });
+    // First stays published; it must never be re-sent.
+    expect(events[0].publishedAt).not.toBeNull();
+    expect(events[1].publishedAt).toBeNull();
+    expect(events[1].attempts).toBe(1);
+    // Third was claimed but never attempted; its claim is released on the next
+    // pass via the claim timeout, and it has burned no attempts.
+    expect(events[2].publishedAt).toBeNull();
+    expect(events[2].attempts).toBe(0);
+
+    // The already-published event is not re-sent on a later pass.
+    fakeProducer.reset();
+    await publishBatch();
+    const keys = fakeProducer.messages.map((m) => m.value.patent_id);
+    expect(keys).not.toContain(String(events[0].aggregateId));
+  });
+
+  /**
+   * Head-of-line blocking is deliberate, but without a cap a permanently
+   * poisonous event blocks every later event forever. After OUTBOX_MAX_ATTEMPTS
+   * the row is dead-lettered so the queue drains past it.
+   */
+  it('dead-letters an event that keeps failing, so the queue can drain', async () => {
+    const { token, adminToken } = await setup();
+    await approvedPatent(token, adminToken);
+    await approvedPatent(token, adminToken, { publicationNumber: 'US6666666' });
+
+    const [poison] = await prisma.outboxEvent.findMany({ orderBy: { id: 'asc' } });
+    await prisma.outboxEvent.update({
+      where: { id: poison.id },
+      data: { attempts: 10, lastError: 'permanently rejected' },
+    });
+
+    const result = await publishBatch();
+
+    // The blocked event is skipped entirely and the one behind it goes out.
+    expect(result.published).toBe(1);
+    expect(fakeProducer.messages).toHaveLength(1);
+
+    const stats = await outboxService.stats();
+    expect(stats.deadLettered).toBe(1);
+    expect(stats.pending).toBe(1);
+  });
+
+  /**
+   * An oversized payload can never be published, so retrying it would wedge the
+   * queue for OUTBOX_MAX_ATTEMPTS passes. It fails immediately with a clear
+   * reason instead of hitting the broker.
+   */
+  it('rejects an oversized payload without calling the broker', async () => {
+    const { token, adminToken } = await setup();
+    await approvedPatent(token, adminToken);
+
+    const [event] = await prisma.outboxEvent.findMany();
+    await prisma.outboxEvent.update({
+      where: { id: event.id },
+      data: { payload: { ...event.payload, specification: 'x'.repeat(MAX_PAYLOAD_BYTES + 1) } },
+    });
+
+    const result = await publishBatch();
+
+    expect(result.published).toBe(0);
+    expect(fakeProducer.messages).toHaveLength(0);
+    const [after] = await prisma.outboxEvent.findMany();
+    expect(after.lastError).toMatch(/over the .* limit/);
+  });
+
+  /**
+   * (patent_id, version) is not a safe dedup key on its own: approve -> decline
+   * -> re-approve repeats the same version, and a consumer deduping on it would
+   * discard the re-approval and drop the patent from the corpus permanently.
+   * `sequence` is monotonic and distinguishes them.
+   */
+  it('stamps a monotonic sequence that distinguishes a re-approval from a redelivery', async () => {
+    const { token, adminToken } = await setup();
+    const patent = await approvedPatent(token, adminToken);
+
+    await api()
+      .post(`/api/patents/${patent.id}/decline`)
+      .set(authHeader(adminToken))
+      .send({ comments: 'Withdrawn pending further review of the cited art' });
+    await submit(patent.id, token);
+    await api().post(`/api/patents/${patent.id}/approve`).set(authHeader(adminToken)).send({});
+
+    await publishBatch();
+
+    const upserts = fakeProducer.messages.filter(
+      (m) => m.value.event_type === 'PatentVersionUpserted',
+    );
+
+    expect(upserts).toHaveLength(2);
+    // Same content version - which is exactly why version alone cannot dedup.
+    expect(upserts[0].value.version).toBe(upserts[1].value.version);
+    expect(BigInt(upserts[1].value.sequence)).toBeGreaterThan(BigInt(upserts[0].value.sequence));
+
+    const sequences = fakeProducer.messages.map((m) => BigInt(m.value.sequence));
+    expect(sequences).toEqual([...sequences].sort((a, b) => (a < b ? -1 : 1)));
   });
 });

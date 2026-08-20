@@ -11,7 +11,15 @@ const jwt = require('jsonwebtoken');
  * it is trying to assert, and a slow suite is a suite that stops being run.
  * The override is env-gated and never applies outside NODE_ENV=test.
  */
-const BCRYPT_COST = Number(process.env.BCRYPT_COST) || (process.env.NODE_ENV === 'test' ? 4 : 12);
+const PRODUCTION_BCRYPT_COST = 12;
+
+// The override is genuinely test-only. Honouring BCRYPT_COST everywhere would
+// let a stray environment variable silently weaken production password hashing
+// to something brute-forceable, and bcrypt throws outright below cost 4.
+const BCRYPT_COST =
+  process.env.NODE_ENV === 'test'
+    ? Math.max(4, Number(process.env.BCRYPT_COST) || 4)
+    : PRODUCTION_BCRYPT_COST;
 
 // bcrypt silently truncates input past 72 bytes, so two different long
 // passwords sharing a 72-byte prefix would authenticate interchangeably.

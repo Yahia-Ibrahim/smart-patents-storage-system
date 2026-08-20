@@ -42,19 +42,31 @@ so it's worth spelling out:
 |---|---|---|
 | `PLAINTEXT` (9092) | Other containers on `patents-net` (kafka-connect, kafka-ui, and later your own services) | `kafka:9092` |
 | `CONTROLLER` (9093) | KRaft's internal metadata-quorum traffic only | not advertised |
-| `EXTERNAL` (29092) | Tools running on your host machine (a local script, a GUI client) | `localhost:29092` |
+| `EXTERNAL` (29092) | Tools running on your host machine (a local script, a GUI client) | `127.0.0.1:29092` |
 
-If you only had one listener advertised as `localhost`, containers couldn't reach it (they'd try
-to connect to their own loopback). If you only advertised the internal container hostname,
-nothing on your host machine could connect. Kafka's advertised-listener mechanism exists
-precisely to hand back the *right* address depending on who's asking — that's what this three-way
-split buys you.
+If you only had one listener advertised as a loopback address, containers couldn't reach it
+(they'd try their own loopback). If you only advertised the internal container hostname, nothing
+on your host could connect. Kafka's advertised-listener mechanism exists precisely to hand back
+the *right* address depending on who's asking.
+
+**EXTERNAL advertises `127.0.0.1`, not `localhost`, on purpose.** A host client bootstraps,
+receives this address in the metadata response, and reconnects to it. Node resolves `localhost`
+to `::1` first while the port is published on IPv4 only, so advertising the hostname produced
+intermittent connection failures that looked like a broken broker. See the networking note at the
+end of this file.
+
+**`KAFKA_LOG_DIRS`** — must be set explicitly to `/var/lib/kafka/data`. The image defaults to
+`/tmp/kafka-logs`, which meant the `./data/kafka` bind mount was present but never written to:
+every `docker compose up` that recreated the container silently discarded every topic, message,
+and consumer offset. This was a real bug, found by recreating the container and watching the
+event log come back empty.
 
 **`KAFKA_CLUSTER_ID`** — KRaft requires a cluster ID to format its storage on first boot; unlike
 ZooKeeper-based Kafka, there's no external system to generate one for you. A fixed value
 (`.env.example`, overridable) means `docker compose down` (without `-v`) and back up reuses the
-same formatted storage instead of erroring on a mismatch. If you ever see `InconsistentClusterIdException`, it means the volume in `./data/kafka` was formatted with a
-different ID than what's currently in your `.env` — wipe `./data/kafka` or fix the ID.
+same formatted storage instead of erroring on a mismatch. If you ever see
+`InconsistentClusterIdException`, the data in `./data/kafka` was formatted with a different ID
+than what's currently in your `.env` — wipe `./data/kafka` or fix the ID.
 
 **Replication factor `1` everywhere** (`KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR`, etc.) — there's
 only one broker, so any factor above 1 would just fail to satisfy. This is the setting you'll
@@ -163,10 +175,12 @@ Reachable at [localhost:8080](http://localhost:8080) once the stack is up.
   patents-net` predictable and leaves room to attach other tooling (a debug container, a
   temporary consumer) without guessing the auto-generated name.
 - **Volumes** follow the existing project convention — bind mounts under `./data/<service>`
-  (already `.gitignore`d via the blanket `data/` rule), not Docker-managed named volumes. `kafka`
-  got the same treatment as `postgres`/`minio` for consistency. Kafka Connect has no volume: it's
-  stateless by design — its config/offsets/status live in Kafka topics, not on its own disk, so
-  killing and recreating the container loses nothing.
+  (already `.gitignore`d via the blanket `data/` rule), not Docker-managed named volumes. Kafka
+  Connect has no volume: it's stateless by design — its config/offsets/status live in Kafka
+  topics, not on its own disk, so killing and recreating the container loses nothing.
+  **A bind mount only persists anything if the service is actually configured to write there** —
+  see `KAFKA_LOG_DIRS` above. Bind mounts also carry a real cost on Windows/macOS: fsync is slow
+  enough that the test suite disables `synchronous_commit` on the test database to stay usable.
 - **Health checks** gate startup ordering via `depends_on: condition: service_healthy`, not
   fixed sleeps: `kafka-connect` waits for `kafka` to report healthy before starting (Connect
   fails hard if it can't reach a broker at boot), and `kafka-ui` waits for both. This is the same
@@ -230,4 +244,8 @@ analytics, audit, replicating to a warehouse. It is just not how `patents.events
 Docker publishes ports on `0.0.0.0` — IPv4 only. Node resolves `localhost` to `::1` first. Every
 host-facing URL therefore uses `127.0.0.1`: Postgres on 5433, MinIO on 9000, Kafka on 29092. Using
 `localhost` produces intermittent `ECONNRESET` and connect timeouts that look exactly like flaky
-infrastructure and are not.
+infrastructure and are not. This applies to Kafka's advertised listener too, not just to the
+addresses you type — the broker hands clients an address to reconnect to.
+
+Browser URLs (`:8080` Kafka UI, `:9001` MinIO console, `:5000/api-docs`) are unaffected; browsers
+fall back to IPv4 correctly.

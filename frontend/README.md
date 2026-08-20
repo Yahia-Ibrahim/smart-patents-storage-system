@@ -90,7 +90,7 @@ Conventions:
 | `/signup`         | Public        | Register (creates a `user`)                         |
 | `/`               | Authenticated | Dashboard (admin sees directory stats)              |
 | `/profile`        | Authenticated | View/edit profile, change password                  |
-| `/patents`        | Authenticated | Placeholder for the forthcoming Patents module      |
+| `/patents`        | Authenticated | Placeholder. The backend Patents API is fully implemented; this page is not built yet. |
 | `/design-system`  | Authenticated | Living component & token showcase                    |
 | `/users`          | Admin only    | User directory (search, role filter, pagination)    |
 | `/users/:id`      | Admin only    | User detail with audit info                          |

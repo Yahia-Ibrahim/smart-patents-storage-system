@@ -19,16 +19,16 @@ npm run dev                                      # API on http://localhost:5000
 npm run relay:dev                                # outbox -> Kafka, in a second terminal
 ```
 
-> **Use `127.0.0.1`, not `localhost`, in every host-facing URL.** Docker publishes ports on
-> `0.0.0.0` (IPv4 only) while Node resolves `localhost` to `::1` first. The result is
-> intermittent `ECONNRESET` and connect timeouts against Postgres, MinIO, and Kafka that look
-> like flaky infrastructure. `.env.example` already uses `127.0.0.1`.
+> **Address Docker services as `127.0.0.1`, never `localhost`.** Docker publishes ports on
+> `0.0.0.0` (IPv4 only) while Node resolves `localhost` to `::1` first, which produces
+> intermittent `ECONNRESET` and connect timeouts that look like flaky infrastructure.
+> `.env.example` already does this. Browser URLs are unaffected.
 
 API docs (Swagger UI) are served at `http://localhost:5000/api-docs`.
 
 ## Environment
 
-Copy `.env.example` to `.env`. Values that matter for the Users Module:
+Copy `.env.example` to `.env`. It documents every variable; the ones worth knowing:
 
 | Variable                 | Purpose                                                                 |
 | ------------------------ | ----------------------------------------------------------------------- |
@@ -139,6 +139,7 @@ Base path: `/api`. Response envelope is uniform:
 | Method | Path                | Role  | Purpose                                             |
 | ------ | ------------------- | ----- | --------------------------------------------------- |
 | GET    | `/categories`       | user  | List (`?search`).                                   |
+| GET    | `/categories/{id}`  | user  | Get one.                                            |
 | POST   | `/categories`       | admin | Create.                                             |
 | PATCH  | `/categories/:id`   | admin | Rename.                                             |
 | DELETE | `/categories/:id`   | admin | Delete (detaches from patents; never deletes them). |
@@ -178,14 +179,18 @@ directly to storage, then sends the returned `objectKey` as `documentKey`:
 
 ```bash
 # 1. ask for an upload target
-curl -X POST localhost:5000/api/patents/uploads   -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json'   -d '{"filename":"spec.pdf","contentType":"application/pdf"}'
+curl -X POST 127.0.0.1:5000/api/patents/uploads   -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json'   -d '{"filename":"spec.pdf","contentType":"application/pdf"}'
 # -> { "uploadUrl": "...", "objectKey": "patents/7/<uuid>/spec.pdf", "expiresAt": "..." }
 
 # 2. upload straight to storage
 curl -X PUT "$UPLOAD_URL" -H 'Content-Type: application/pdf' --data-binary @spec.pdf
 
 # 3. create the patent referencing the key
-curl -X POST localhost:5000/api/patents   -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json'   -d '{"title":"...","abstract":"...","specification":"...","documentKey":"'"$OBJECT_KEY"'"}'
+curl -X POST 127.0.0.1:5000/api/patents   -H "Authorization: Bearer $ACCESS_TOKEN" -H 'Content-Type: application/json'   -d '{"title":"...","abstract":"...","specification":"...","documentKey":"'"$OBJECT_KEY"'"}'
+
+# 4. submit, then have an admin approve - approval is what emits the event
+curl -X POST 127.0.0.1:5000/api/patents/$ID/submit  -H "Authorization: Bearer $ACCESS_TOKEN"
+curl -X POST 127.0.0.1:5000/api/patents/$ID/approve -H "Authorization: Bearer $ADMIN_TOKEN"   -H 'Content-Type: application/json' -d '{}'
 ```
 
 Keys are derived server-side and namespaced by user id; a key issued to someone else is
@@ -195,37 +200,12 @@ and an oversized object is deleted rather than left behind.
 ## Idempotency
 
 `POST /patents` accepts an optional `Idempotency-Key` header. A repeated key returns the
-original response with `Idempotent-Replay: true` instead of creating a second patent; the same
-key with a different body is a `409`. Only successful responses are recorded, so a failed
-request stays retryable.
+original response with `Idempotent-Replay: true` instead of creating a second patent.
 
-### Example requests
-
-```bash
-# Register
-curl -X POST localhost:5000/api/users/signup \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"Ada Lovelace","email":"ada@example.com","password":"Passw0rd123"}'
-
-# Log in
-curl -X POST localhost:5000/api/users/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"ada@example.com","password":"Passw0rd123"}'
-
-# Call a protected route
-curl localhost:5000/api/users/me -H "Authorization: Bearer $ACCESS_TOKEN"
-
-# Refresh
-curl -X POST localhost:5000/api/users/refresh \
-  -H 'Content-Type: application/json' \
-  -d '{"refreshToken":"'"$REFRESH_TOKEN"'"}'
-
-# Admin creates another admin
-curl -X POST localhost:5000/api/users/admins \
-  -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"Second Admin","email":"admin2@example.com","password":"Passw0rd123"}'
-```
+The key is *reserved* before the handler runs, so a retry that arrives while the original is
+still in flight — the common case, since clients retry after a dropped connection — gets a `409`
+"still in progress" rather than creating a duplicate. The same key with a different body is also
+a `409`. A failed request releases its key, so it stays retryable.
 
 ## Messaging: the transactional outbox
 
@@ -247,16 +227,25 @@ POST /patents/:id/approve
 ```
 
 - **Delivery is at-least-once.** The relay can publish and then fail to mark the row published,
-  so it re-sends. **Consumers must be idempotent on `(patent_id, version)`.**
+  so it re-sends. Consumers must be idempotent — see the dedup rule below.
 - **Keyed by patent id** so every version of one patent lands on one partition — Kafka only
   guarantees ordering within a partition.
-- **A failed publish stops the batch** rather than skipping ahead. Head-of-line blocking is
-  deliberate: delivering v2 before v1 is worse than delivering late. Stuck rows surface in
-  `/ready`.
+- **A failed publish stops the batch** rather than skipping ahead: delivering v2 before v1 is
+  worse than delivering late. After `OUTBOX_MAX_ATTEMPTS` failures a row is dead-lettered so one
+  poisonous event cannot block the queue forever; `/ready` reports the count.
 - **The API never talks to Kafka.** A broker outage cannot take the API down; events simply
   queue in Postgres. That is the entire point.
-- Runs as its own process so a stalled relay is visible, and because several relays are safe to
-  run concurrently (`FOR UPDATE SKIP LOCKED`).
+- **Run exactly one relay.** Claiming stops two relays doing the same work, but it does not keep
+  them in order — relay B can publish v2 while relay A is still sending v1.
+
+### Consuming these events
+
+- **Order by `sequence`** (a monotonic integer, the outbox row id) and ignore any event whose
+  `sequence` is below the last one you applied for that patent.
+- **Dedup on `event_id`** (a UUID, stable across redeliveries of the same event).
+- **Do not dedup on `(patent_id, version)`.** `version` tracks *content*, so an
+  approve → decline → re-approve cycle legitimately repeats it, and deduping on it would drop
+  the patent from your projection permanently.
 
 ### Events
 
@@ -276,12 +265,15 @@ breaking change.
 | Path      | Purpose                                                                       |
 | --------- | ----------------------------------------------------------------------------- |
 | `/health` | Liveness. Touches nothing — a probe that fails on a slow query gets the container killed during exactly the incident where you least want a restart. |
-| `/ready`  | Readiness. Checks Postgres and object storage, reports the outbox backlog, and returns `503` when a dependency is down. Kafka is deliberately *not* a readiness dependency. |
+| `/ready`  | Readiness. Checks Postgres and object storage, reports the outbox backlog (`pending` / `retrying` / `deadLettered`), and returns `503` when a dependency is down. Kafka is deliberately *not* a readiness dependency, and a growing backlog never fails the probe — that is the outbox working while the broker is away. |
+
+The probe is unauthenticated, so it reports `ok` / `error` only; the underlying driver message
+goes to the log keyed by request id.
 
 ## Security notes
 
-- **Passwords**: bcrypt, cost 12 (lowered under `NODE_ENV=test` so the suite is not dominated by KDF time). Input is capped at 72 bytes (bcrypt's limit) in validation so
-  nothing is silently truncated.
+- **Passwords**: bcrypt at cost 12. Input is capped at 72 bytes (bcrypt's limit) in validation,
+  so nothing is silently truncated.
 - **Login is timing-safe**: an unknown email still runs a bcrypt comparison against a dummy hash,
   so response time can't be used to enumerate registered accounts.
 - **Email**: trimmed + lowercased only. `normalizeEmail()` is deliberately avoided — it collapses
@@ -290,6 +282,10 @@ breaking change.
   brute-force login attempts return `429`.
 - **No sensitive data leaves the API**: responses are built from explicit DTOs, so `password_hash`
   can't leak even if a column is added later. BigInt ids are serialized as strings.
+- **Email addresses are viewer-scoped.** Any signed-up user can read approved patents and search
+  the inventor directory, so addresses go out only to an admin or their owner — otherwise
+  registering would be a way to download the user directory. Search still *matches* on email
+  server-side. Review history is owner-or-admin, since comments are internal notes.
 - **Object keys are server-derived**, namespaced per user, and validated on use — a client-supplied
   key would be a path-traversal and cross-user-overwrite primitive.
 - **CORS** is an explicit allowlist; the app refuses to start in production without one.
@@ -307,19 +303,22 @@ Postgres and nothing else** — object storage and Kafka are replaced by in-memo
 (`tests/fakes.js`), because a suite that requires a full compose stack is a suite that stops
 being run.
 
-195 tests across 9 files: auth and sessions, role authorization, profiles, admin management,
+214 tests across 10 files: auth and sessions, role authorization, profiles, admin management,
 the full patent lifecycle and its illegal transitions, cross-user visibility, uploads and
-document access, categories, inventors, and the outbox/relay — including that a failure to write
-the event rolls back the status change with it.
+document access, categories, inventors, and the outbox/relay.
 
-Two things the harness does that are worth knowing:
+`tests/patents.review.test.js` is separate on purpose: each test there pins a defect found by
+code review rather than by running the suite — concurrent approvals, concurrent idempotent
+retries, shared document keys, mid-batch relay failures, and the validation gaps that surfaced
+as 500s. They are the paths nothing exercised, which is why the bugs survived.
 
-- **bcrypt cost drops to 4 under `NODE_ENV=test`.** At cost 12 the patent tests spend most of
-  their time in the KDF and start tripping their own timeouts.
-- **`synchronous_commit` is turned off on the test database.** The Postgres data directory is a
-  bind mount, and on Windows/macOS that makes fsync brutally slow — multi-second checkpoint
-  syncs. Turning it off took the patent suite from 265s to 25s. Scoped to the test database
-  only, which is truncated between every test anyway.
+Two things the harness does that will otherwise confuse you:
+
+- **bcrypt cost drops to 4 under `NODE_ENV=test`.** At 12, the patent tests spend most of their
+  wall time in the KDF and trip their own timeouts. Assert against `BCRYPT_COST`, never `12`.
+- **`synchronous_commit` is off on the test database.** Its data directory is a bind mount and
+  fsync there is slow enough to trip test timeouts — this took the patent suite from 265s to
+  25s. Scoped to the test DB, which is truncated between every test anyway.
 
 ## Commands
 

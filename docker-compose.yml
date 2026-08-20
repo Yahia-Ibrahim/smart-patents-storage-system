@@ -145,7 +145,11 @@ services:
       # patents-net (they reach it as "kafka:9092"), CONTROLLER for KRaft's
       # internal quorum traffic, EXTERNAL for tools on your host machine.
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      # EXTERNAL advertises 127.0.0.1, not localhost. A host client bootstraps,
+      # receives this address in the metadata response, and reconnects to it — and
+      # Node resolves "localhost" to ::1 first while this port is published on IPv4
+      # only. Advertising the literal IPv4 address removes that failure mode.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://127.0.0.1:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
@@ -157,6 +161,10 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Without this the broker writes to its default /tmp/kafka-logs and the volume
+      # below is mounted but never used — every `docker compose up` that recreates the
+      # container silently loses every topic, message, and consumer offset.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
       - "29092:29092"
     volumes:

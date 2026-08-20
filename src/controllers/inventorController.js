@@ -10,7 +10,7 @@ exports.createInventor = async (req, res, next) => {
       req.user,
     );
 
-    sendSuccess(res, 201, toInventorDetailDto(inventor));
+    sendSuccess(res, 201, toInventorDetailDto(inventor, req.user, { includeEmail: true }));
   } catch (error) {
     next(error);
   }
@@ -21,7 +21,7 @@ exports.getAllInventors = async (req, res, next) => {
     const result = await inventorService.listInventors(req.query);
 
     sendSuccess(res, 200, {
-      inventors: result.inventors.map(toInventorDetailDto),
+      inventors: result.inventors.map((inventor) => toInventorDetailDto(inventor, req.user)),
       pagination: {
         total: result.total,
         page: result.page,
@@ -38,7 +38,7 @@ exports.getInventorById = async (req, res, next) => {
   try {
     const inventor = await inventorService.getInventorById(BigInt(req.params.id));
 
-    sendSuccess(res, 200, toInventorDetailDto(inventor));
+    sendSuccess(res, 200, toInventorDetailDto(inventor, req.user));
   } catch (error) {
     next(error);
   }
@@ -53,7 +53,7 @@ exports.updateInventor = async (req, res, next) => {
       req.user,
     );
 
-    sendSuccess(res, 200, toInventorDetailDto(inventor));
+    sendSuccess(res, 200, toInventorDetailDto(inventor, req.user));
   } catch (error) {
     next(error);
   }

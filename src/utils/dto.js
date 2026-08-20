@@ -57,19 +57,58 @@ const toProfileDto = (user) => ({
  */
 const decimalToNumber = (value) => (value === null || value === undefined ? null : Number(value));
 
+/**
+ * Email is personal data, and every one of these records is readable by any
+ * signed-up user: approved patents are public to the platform, and the
+ * inventor directory is searchable. Returning addresses on all of them turns
+ * "create an account" into "download the user and admin email directory".
+ *
+ * So an address goes out only to someone with a reason to have it: an admin,
+ * or the person it belongs to. `viewer` is `req.user` — omitted means no
+ * viewer, and no email.
+ */
+const canSeeEmailOf = (viewer, subjectUserId) => {
+  if (!viewer) return false;
+  if (viewer.role === 'admin') return true;
+  return subjectUserId !== null && subjectUserId !== undefined && viewer.userId === subjectUserId;
+};
+
+const partyDto = (party, viewer) =>
+  party
+    ? {
+        id: String(party.id),
+        name: party.name,
+        ...(canSeeEmailOf(viewer, party.id) ? { email: party.email } : {}),
+      }
+    : null;
+
 const toCategoryDto = (category) => ({
   id: String(category.id),
   name: category.name,
 });
 
-/** Inventor with its optional linked account, for the inventors endpoints. */
-const toInventorDetailDto = (inventor) => ({
-  ...toInventorDto(inventor),
-  linkedUser: inventor.user
-    ? { id: String(inventor.user.id), name: inventor.user.name, email: inventor.user.email }
-    : null,
-  createdAt: inventor.createdAt,
-});
+/**
+ * Inventor with its optional linked account.
+ *
+ * The inventor's own email is shown to an admin or to the user the profile is
+ * linked to. Everyone else gets name and organization, which is enough to pick
+ * the right person off a search; search still *matches* on email server-side,
+ * so nothing about the workflow breaks.
+ */
+const toInventorDetailDto = (inventor, viewer, { includeEmail = false } = {}) => {
+  const { email, ...rest } = toInventorDto(inventor) || {};
+  // includeEmail is for the create response only: the caller just supplied the
+  // address, so withholding it from the echo is pointless friction rather than
+  // privacy. Every read path leaves it false.
+  const visible = includeEmail || canSeeEmailOf(viewer, inventor.userId ?? null);
+
+  return {
+    ...rest,
+    ...(visible ? { email } : {}),
+    linkedUser: partyDto(inventor.user, viewer),
+    createdAt: inventor.createdAt,
+  };
+};
 
 const toPatentInventorDto = (link) => ({
   ...toInventorDto(link.inventor),
@@ -81,7 +120,7 @@ const toPatentInventorDto = (link) => ({
  * the record, and a 20-item page carrying twenty full patent bodies is a
  * response nobody asked for.
  */
-const toPatentDto = (patent) => ({
+const toPatentDto = (patent, viewer) => ({
   id: String(patent.id),
   title: patent.title,
   abstract: patent.abstract,
@@ -90,9 +129,7 @@ const toPatentDto = (patent) => ({
   publicationNumber: patent.publicationNumber,
   jurisdiction: patent.jurisdiction,
   submittedBy: String(patent.submittedBy),
-  submitter: patent.submitter
-    ? { id: String(patent.submitter.id), name: patent.submitter.name, email: patent.submitter.email }
-    : undefined,
+  submitter: patent.submitter ? partyDto(patent.submitter, viewer) : undefined,
   categories: (patent.categories || []).map((link) => toCategoryDto(link.category)),
   inventors: (patent.inventors || []).map(toPatentInventorDto),
   hasDocument: Boolean(patent.documentKey),
@@ -109,26 +146,25 @@ const toPatentDto = (patent) => ({
  * it is unguessable and useless on its own — reading the object still requires
  * a presigned URL from GET /patents/:id/document.
  */
-const toPatentDetailDto = (patent) => ({
-  ...toPatentDto(patent),
+const toPatentDetailDto = (patent, viewer) => ({
+  ...toPatentDto(patent, viewer),
   specification: patent.specification,
   documentKey: patent.documentKey,
 });
 
-const toPatentReviewDto = (review) => ({
+const toPatentReviewDto = (review, viewer) => ({
   id: String(review.id),
   patentId: String(review.patentId),
   stage: review.reviewStage,
   decision: review.decision,
   aiConfidenceScore: decimalToNumber(review.aiConfidenceScore),
   comments: review.comments,
-  reviewer: review.reviewer
-    ? { id: String(review.reviewer.id), name: review.reviewer.name, email: review.reviewer.email }
-    : null,
+  reviewer: partyDto(review.reviewer, viewer),
   createdAt: review.createdAt,
 });
 
 module.exports = {
+  canSeeEmailOf,
   toUserDto,
   toAdminUserDto,
   toInventorDto,

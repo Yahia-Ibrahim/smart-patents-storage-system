@@ -87,7 +87,11 @@ model Patent {
   /// Object-store key of the submitted document, e.g.
   /// "patents/3/2f1c.../spec.pdf". A key, not a URL: presigned URLs expire,
   /// so storing one would hand out a reference that is dead within the hour.
-  documentKey   String?      @map("document_key") @db.Text
+  ///
+  /// Unique because two patents sharing a key makes document deletion unsafe:
+  /// deleting a draft would destroy the object an approved patent still points
+  /// at, which is exactly the tampering the draft-only delete rule prevents.
+  documentKey   String?      @unique @map("document_key") @db.Text
 
   /// Superseded by documentKey. Kept nullable so the column can be dropped in
   /// a later migration without a data-loss step; nothing writes it.
@@ -210,6 +214,14 @@ model OutboxEvent {
   payload       Json
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
   publishedAt   DateTime? @map("published_at") @db.Timestamptz
+
+  /// Set when a relay takes ownership of the row, cleared if publishing fails.
+  /// Publishing happens OUTSIDE a database transaction (a Kafka round trip must
+  /// never be held inside one), so a row lock cannot be what stops a second
+  /// relay picking up the same event — this claim marker is. Stale claims are
+  /// reclaimed after CLAIM_TIMEOUT so a crashed relay does not strand events.
+  claimedAt     DateTime? @map("claimed_at") @db.Timestamptz
+
   attempts      Int       @default(0)
   lastError     String?   @map("last_error") @db.Text
 

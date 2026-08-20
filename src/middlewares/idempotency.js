@@ -7,17 +7,25 @@ const { conflict } = require('../utils/errors');
  *
  * The case this exists for: a client POSTs a patent, the connection drops
  * before the response arrives, the client retries. Without a key the retry
- * creates a second patent and the user has no way to tell. With one, the retry
- * returns the original response.
+ * creates a second patent and the user has no way to tell.
+ *
+ * That retry is usually **concurrent** with the original — the first request is
+ * still running when the client gives up on it. So a look-then-insert would not
+ * help: both requests would find no row and both would create a patent. Instead
+ * the key is *reserved* up front with a single insert, and the unique primary
+ * key makes the database decide which request owns it.
  *
  * Storage is keyed by (userId, endpoint, key) so one caller's key cannot
- * collide with another's, and `requestHash` catches the case where a client
- * reuses a key with a different body — that is a client bug, and returning the
- * first request's answer for it would be worse than an error.
+ * collide with another's, and `requestHash` catches a client reusing a key with
+ * a different body — returning the first request's answer for that would be
+ * worse than an error.
  *
  * The header is optional. Making it mandatory would break every naive client
  * for a guarantee most requests do not need.
  */
+
+/** A reserved-but-unfinished request. No HTTP status is 0, so it cannot collide. */
+const IN_FLIGHT = 0;
 
 const hashBody = (body) =>
   crypto.createHash('sha256').update(JSON.stringify(body ?? {})).digest('hex');
@@ -33,59 +41,60 @@ const idempotency = () => async (req, res, next) => {
 
   const endpoint = `${req.method} ${req.baseUrl}${req.route?.path ?? req.path}`;
   const requestHash = hashBody(req.body);
-  const where = { userId_endpoint_key: { userId: req.user.userId, endpoint, key } };
+  const id = { userId: req.user.userId, endpoint, key };
 
+  // Reserve the key. Winning this insert is what grants the right to run the
+  // handler; losing it means someone else already owns this key.
   try {
-    const existing = await prisma.idempotencyKey.findUnique({ where });
-
-    if (existing) {
-      if (existing.requestHash !== requestHash) {
-        return next(
-          conflict('This Idempotency-Key was already used with a different request body'),
-        );
-      }
-
-      res.setHeader('Idempotent-Replay', 'true');
-      return res.status(existing.responseStatus).json(existing.responseBody);
-    }
+    await prisma.idempotencyKey.create({
+      data: { ...id, requestHash, responseStatus: IN_FLIGHT, responseBody: {} },
+    });
   } catch (error) {
-    return next(error);
+    if (error.code !== 'P2002') return next(error);
+
+    const existing = await prisma.idempotencyKey.findUnique({
+      where: { userId_endpoint_key: id },
+    });
+
+    // Vanishingly rare: the row was deleted between the failed insert and this
+    // read. Treat it as unreserved rather than crashing.
+    if (!existing) return next();
+
+    if (existing.requestHash !== requestHash) {
+      return next(conflict('This Idempotency-Key was already used with a different request body'));
+    }
+
+    if (existing.responseStatus === IN_FLIGHT) {
+      // 409 rather than blocking: the original request is still running, and
+      // holding this connection open until it finishes would tie up a
+      // connection per retry for as long as the first request takes.
+      return next(
+        conflict('A request with this Idempotency-Key is still in progress; retry shortly'),
+      );
+    }
+
+    res.setHeader('Idempotent-Replay', 'true');
+    return res.status(existing.responseStatus).json(existing.responseBody);
   }
 
-  // Capture the response, persist it, and only then send.
+  // Record the outcome before sending, so a client that retries the instant it
+  // sees the response always finds the record already written.
   //
-  // Persisting *before* responding is deliberate. Firing the write off and
-  // returning immediately would be faster, but it leaves a database write in
-  // flight after the request is over: the caller can receive a 201, retry, and
-  // find no record yet — which is precisely the duplicate this middleware
-  // exists to prevent. (It also strands transactions past the end of a test,
-  // which is how this was found.)
-  //
-  // Only successes are recorded: a failed request should stay retryable, and
-  // caching a 500 would pin the caller to it forever.
+  // A non-2xx releases the reservation instead of storing it: a failed request
+  // must stay retryable, and caching a 500 would pin the caller to it forever.
   const originalJson = res.json.bind(res);
 
   res.json = (body) => {
-    if (res.statusCode < 200 || res.statusCode >= 300) return originalJson(body);
+    const settle =
+      res.statusCode >= 200 && res.statusCode < 300
+        ? prisma.idempotencyKey.update({
+            where: { userId_endpoint_key: id },
+            data: { responseStatus: res.statusCode, responseBody: body },
+          })
+        : prisma.idempotencyKey.delete({ where: { userId_endpoint_key: id } });
 
-    prisma.idempotencyKey
-      .create({
-        data: {
-          key,
-          userId: req.user.userId,
-          endpoint,
-          requestHash,
-          responseStatus: res.statusCode,
-          responseBody: body,
-        },
-      })
-      .catch((error) => {
-        // A lost race (two concurrent identical requests) throws P2002. Both
-        // are returning the same answer anyway, so it is not worth failing on.
-        if (error.code !== 'P2002') {
-          console.error('[idempotency] failed to record response:', error.message);
-        }
-      })
+    settle
+      .catch((error) => console.error('[idempotency] failed to settle key:', error.message))
       .finally(() => originalJson(body));
 
     return res;
@@ -94,4 +103,4 @@ const idempotency = () => async (req, res, next) => {
   return next();
 };
 
-module.exports = { idempotency };
+module.exports = { IN_FLIGHT, idempotency };

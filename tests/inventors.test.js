@@ -79,7 +79,46 @@ describe('POST /api/inventors', () => {
       .set(authHeader(token))
       .send({ ...VALID, email: 'GRACE@Example.COM' });
 
+    // The create response echoes the address the caller just supplied.
     expect(res.body.data.email).toBe('grace@example.com');
+    expect((await prisma.inventor.findFirst()).email).toBe('grace@example.com');
+  });
+
+  /**
+   * Any signed-up user can search the inventor directory. Returning addresses
+   * there would make "create an account" a way to download the user and admin
+   * email directory.
+   */
+  it('hides inventor emails from an unrelated user on read', async () => {
+    const { token } = await setup();
+    await createInventor({ email: 'private@example.com' });
+
+    const list = await api().get('/api/inventors').set(authHeader(token));
+    const one = await api()
+      .get(`/api/inventors/${list.body.data.inventors[0].id}`)
+      .set(authHeader(token));
+
+    expect(list.body.data.inventors[0].email).toBeUndefined();
+    expect(list.body.data.inventors[0].fullName).toBeTruthy();
+    expect(one.body.data.email).toBeUndefined();
+  });
+
+  it('shows inventor emails to an admin', async () => {
+    const { adminToken } = await setup();
+    await createInventor({ email: 'private@example.com' });
+
+    const res = await api().get('/api/inventors').set(authHeader(adminToken));
+
+    expect(res.body.data.inventors[0].email).toBe('private@example.com');
+  });
+
+  it('shows a linked user their own inventor email', async () => {
+    const { user, token } = await setup();
+    const inventor = await createInventor({ userId: user.id, email: 'mine@example.com' });
+
+    const res = await api().get(`/api/inventors/${inventor.id}`).set(authHeader(token));
+
+    expect(res.body.data.email).toBe('mine@example.com');
   });
 
   it('rejects an invalid email', async () => {
