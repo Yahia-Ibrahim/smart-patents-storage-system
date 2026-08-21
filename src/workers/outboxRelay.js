@@ -1,4 +1,3 @@
-const prisma = require('../config/prisma');
 const config = require('../config/env');
 const { connectProducer, disconnectProducer, getProducer } = require('../config/kafka');
 const outboxService = require('../services/outboxService');
@@ -120,11 +119,17 @@ const start = async () => {
 
   loop();
 
+  /**
+   * Stops the loop and releases the producer. Deliberately does NOT disconnect
+   * Prisma: the worker does not own the process, and tearing down a shared
+   * client from inside a library function is the sort of thing that works in
+   * production and breaks everything else. src/relay.js owns that.
+   */
   const stop = async () => {
     running = false;
     if (timer) clearTimeout(timer);
+    timer = null;
     await disconnectProducer();
-    await prisma.$disconnect();
   };
 
   return { stop };

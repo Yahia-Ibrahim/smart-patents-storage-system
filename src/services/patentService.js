@@ -1,245 +1,65 @@
 const prisma = require('../config/prisma');
-const config = require('../config/env');
-const { ROLES } = require('../utils/roles');
-const { badRequest, forbidden, notFound, conflict } = require('../utils/errors');
-const storageService = require('./storageService');
+const { conflict, notFound } = require('../utils/errors');
 const outboxService = require('./outboxService');
 const {
   AGGREGATE_TYPE,
-  EVENT_TYPES,
   patentVersionUpserted,
   patentVersionWithdrawn,
 } = require('../events/patentEvents');
 
-/**
- * Patent lifecycle and the source of truth for corpus membership.
- *
- * Two rules live here and nowhere else:
- *
- *  1. **Visibility is data-scoped, not just role-scoped.** `requireUser` only
- *     proves someone is logged in. It does not stop them reading another
- *     user's draft, so every read goes through `visibilityWhere`.
- *  2. **Status transitions are validated server-side.** The client never sends
- *     a status; it calls an action, and the service decides whether that
- *     action is legal from the current state.
- */
-
-const STATUS = Object.freeze({
-  DRAFT: 'draft',
-  PENDING_AI: 'pending_ai',
-  PENDING_ADMIN: 'pending_admin',
-  APPROVED: 'approved',
-  DECLINED: 'declined',
-});
+const access = require('./patents/access');
+const documents = require('./patents/documents');
+const relations = require('./patents/relations');
+const {
+  STATUS,
+  EDITABLE_STATUSES,
+  assertTransition,
+  applyTransition,
+} = require('./patents/lifecycle');
 
 /**
- * Legal transitions. `pending_ai` is reachable by nothing: the AI pre-screen
- * is a separate service owned by another engineer, so the enum value is
- * reserved and deliberately unused rather than faked.
+ * Patent workflow.
+ *
+ * This module orchestrates; it does not decide. The rules live in siblings so
+ * each has one reason to change and can be tested without an HTTP request:
+ *
+ *   patents/access.js     — who may see or modify what
+ *   patents/lifecycle.js  — which status transitions are legal
+ *   patents/documents.js  — uploads, downloads, and document ownership
+ *   patents/relations.js  — category and inventor link validation
  */
-const TRANSITIONS = Object.freeze({
-  submit: { from: [STATUS.DRAFT, STATUS.DECLINED], to: STATUS.PENDING_ADMIN },
-  approve: { from: [STATUS.PENDING_ADMIN], to: STATUS.APPROVED },
-  decline: { from: [STATUS.PENDING_ADMIN, STATUS.APPROVED], to: STATUS.DECLINED },
-});
 
-/** Content fields; changing any of these bumps `version`. See the schema note. */
+const { PATENT_INCLUDE } = access;
+
+/** Content fields. Changing any of these bumps `version`; nothing else does. */
 const CONTENT_FIELDS = ['title', 'abstract', 'specification', 'documentKey'];
-
-const PATENT_INCLUDE = {
-  submitter: { select: { id: true, name: true, email: true } },
-  categories: { include: { category: true } },
-  inventors: { include: { inventor: true }, orderBy: { inventorOrder: 'asc' } },
-};
-
-const isAdmin = (user) => user.role === ROLES.ADMIN;
+const METADATA_FIELDS = ['publicationNumber', 'jurisdiction'];
 
 /**
- * What this caller is allowed to see.
- *
- * Admins see everything. Everyone else sees their own patents in any state,
- * plus other people's only once approved — an unapproved patent is private to
- * its submitter.
+ * `publicationNumber` is unique, so this is belt-and-braces: a concurrent
+ * create can still lose the race and hit the constraint, which the error
+ * handler maps to a 409 anyway. The point of checking first is the message —
+ * "that publication number is taken" instead of a generic conflict.
  */
-const visibilityWhere = (user) =>
-  isAdmin(user) ? {} : { OR: [{ submittedBy: user.userId }, { status: STATUS.APPROVED }] };
+const assertPublicationNumberFree = async (publicationNumber, exceptId = null) => {
+  if (!publicationNumber) return;
 
-const findVisiblePatent = async (id, user) => {
-  const patent = await prisma.patent.findFirst({
-    where: { id, ...visibilityWhere(user) },
-    include: PATENT_INCLUDE,
-  });
+  const clash = await prisma.patent.findUnique({ where: { publicationNumber } });
 
-  // 404 rather than 403 for an invisible patent: a 403 would confirm that the
-  // id exists, which is itself a small information leak.
-  if (!patent) throw notFound('Patent not found');
-
-  return patent;
+  if (clash && clash.id !== exceptId) {
+    throw conflict('A patent with that publication number already exists');
+  }
 };
 
-const findOwnedPatent = async (id, user) => {
-  const patent = await prisma.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
+const createPatent = async (input, user) => {
+  const { title, abstract, specification, documentKey, publicationNumber, jurisdiction } = input;
 
-  if (!patent) throw notFound('Patent not found');
+  await documents.verifyDocument(documentKey, user.userId);
 
-  if (patent.submittedBy !== user.userId && !isAdmin(user)) {
-    throw forbidden('You can only modify patents you submitted');
-  }
+  const inventorLinks = await relations.resolveInventorLinks(input.inventors);
+  const categoryIds = await relations.resolveCategoryIds(input.categoryIds);
 
-  return patent;
-};
-
-const transitionConflict = (action, status) =>
-  conflict(
-    `Cannot ${action} a patent with status "${status}"; expected one of: ${TRANSITIONS[action].from.join(', ')}`,
-  );
-
-const assertTransition = (patent, action) => {
-  const rule = TRANSITIONS[action];
-
-  if (!rule.from.includes(patent.status)) throw transitionConflict(action, patent.status);
-
-  return rule.to;
-};
-
-/**
- * Applies a state transition *conditionally, inside the transaction*.
- *
- * Checking the status with a read and then writing unconditionally is
- * check-then-act: two admins approving the same patent concurrently both read
- * `pending_admin`, both pass the check, and both commit — producing two review
- * rows and two identical events. Worse, a concurrent approve and decline both
- * commit, and the outbox then holds an Upserted and a Withdrawn whose order
- * need not match the final stored status, so the corpus disagrees with the
- * source of truth permanently.
- *
- * Putting the status in the WHERE clause makes the database the arbiter: the
- * loser matches zero rows and is rejected.
- */
-const applyTransition = async (tx, id, action, data) => {
-  const rule = TRANSITIONS[action];
-
-  const { count } = await tx.patent.updateMany({
-    where: { id, status: { in: rule.from } },
-    data: { status: rule.to, ...data },
-  });
-
-  if (count === 0) {
-    const current = await tx.patent.findUnique({ where: { id }, select: { status: true } });
-    throw transitionConflict(action, current ? current.status : 'unknown');
-  }
-
-  return tx.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
-};
-
-/**
- * Confirms the uploaded object exists, belongs to this user, and is within the
- * size limit.
- *
- * The size check happens here rather than on the presigned URL because a
- * presigned PUT cannot express a maximum content length on its own — the only
- * reliable moment to enforce it is after the upload, before the row is written.
- */
-const verifyDocument = async (objectKey, userId, { allowPatentId = null } = {}) => {
-  if (!storageService.keyBelongsToUser(objectKey, userId)) {
-    throw badRequest('documentKey was not issued to you; request one from POST /patents/uploads');
-  }
-
-  // One document, one patent. Two patents sharing a key would make deletion
-  // unsafe: deleting the draft would destroy the object the approved patent
-  // still points at. The column is unique, but checking here turns a raw
-  // constraint violation into an explanatory 409.
-  const attached = await prisma.patent.findUnique({
-    where: { documentKey: objectKey },
-    select: { id: true },
-  });
-
-  if (attached && attached.id !== allowPatentId) {
-    throw conflict('That document is already attached to another patent');
-  }
-
-  const head = await storageService.headObject(objectKey);
-
-  if (!head) {
-    throw badRequest('No uploaded document found for that documentKey');
-  }
-
-  if (head.size > config.storage.maxUploadBytes) {
-    await storageService.deleteObject(objectKey);
-    throw badRequest(
-      `Uploaded document is ${head.size} bytes; the maximum is ${config.storage.maxUploadBytes}`,
-    );
-  }
-
-  return head;
-};
-
-/**
- * Validates the inventor list: ids must exist, appear once, and carry a
- * contiguous 1..N ordering. Sloppy ordering is accepted silently by the
- * database (it is just an integer) and then confuses every consumer, so it is
- * rejected here.
- */
-const resolveInventorLinks = async (inventors) => {
-  if (!inventors || inventors.length === 0) return [];
-
-  const ids = inventors.map((entry) => BigInt(entry.inventorId));
-  const unique = new Set(ids.map(String));
-
-  if (unique.size !== ids.length) {
-    throw badRequest('The same inventor cannot be listed twice on a patent');
-  }
-
-  const found = await prisma.inventor.findMany({ where: { id: { in: ids } }, select: { id: true } });
-
-  if (found.length !== ids.length) {
-    const known = new Set(found.map((row) => String(row.id)));
-    const missing = ids.map(String).filter((id) => !known.has(id));
-    throw badRequest(`Unknown inventor id(s): ${missing.join(', ')}`);
-  }
-
-  const orders = inventors.map((entry, index) => entry.order ?? index + 1);
-  const sorted = [...orders].sort((a, b) => a - b);
-  const contiguous = sorted.every((value, index) => value === index + 1);
-
-  if (!contiguous) {
-    throw badRequest('inventor order must be a contiguous sequence starting at 1');
-  }
-
-  return inventors.map((entry, index) => ({
-    inventorId: BigInt(entry.inventorId),
-    inventorOrder: entry.order ?? index + 1,
-  }));
-};
-
-const resolveCategoryIds = async (categoryIds) => {
-  if (!categoryIds || categoryIds.length === 0) return [];
-
-  const ids = [...new Set(categoryIds.map(String))].map(BigInt);
-  const found = await prisma.category.findMany({ where: { id: { in: ids } }, select: { id: true } });
-
-  if (found.length !== ids.length) {
-    const known = new Set(found.map((row) => String(row.id)));
-    const missing = ids.map(String).filter((id) => !known.has(id));
-    throw badRequest(`Unknown category id(s): ${missing.join(', ')}`);
-  }
-
-  return ids;
-};
-
-const createPatent = async (
-  { title, abstract, specification, documentKey, publicationNumber, jurisdiction, categoryIds, inventors },
-  user,
-) => {
-  await verifyDocument(documentKey, user.userId);
-
-  const inventorLinks = await resolveInventorLinks(inventors);
-  const resolvedCategoryIds = await resolveCategoryIds(categoryIds);
-
-  if (publicationNumber) {
-    const clash = await prisma.patent.findUnique({ where: { publicationNumber } });
-    if (clash) throw conflict('A patent with that publication number already exists');
-  }
+  await assertPublicationNumberFree(publicationNumber);
 
   return prisma.patent.create({
     data: {
@@ -249,51 +69,30 @@ const createPatent = async (
       documentKey,
       publicationNumber: publicationNumber || null,
       jurisdiction: jurisdiction || null,
-      // Always set explicitly rather than relying on the column default: the
-      // status a patent starts in is a business rule, and business rules
-      // belong in the service where they can be read.
+      // Set explicitly rather than relying on the column default: where a
+      // patent starts is a business rule, and business rules belong somewhere
+      // a reader will look.
       status: STATUS.DRAFT,
       version: 1,
       submittedBy: user.userId,
-      categories: { create: resolvedCategoryIds.map((categoryId) => ({ categoryId })) },
+      categories: { create: categoryIds.map((categoryId) => ({ categoryId })) },
       inventors: { create: inventorLinks },
     },
     include: PATENT_INCLUDE,
   });
 };
 
-const listPatents = async ({ page = 1, limit = 20, status, categoryId, submittedBy, jurisdiction, search }, user) => {
-  // visibilityWhere and the search filter both produce an `OR`, and spreading
-  // them into one object would let the second silently replace the first —
-  // which would drop the visibility rule and expose every user's drafts. AND
-  // keeps them as independent conjuncts, so both always apply.
-  const where = {
-    AND: [
-      visibilityWhere(user),
-      ...(status ? [{ status }] : []),
-      ...(jurisdiction ? [{ jurisdiction }] : []),
-      ...(submittedBy ? [{ submittedBy: BigInt(submittedBy) }] : []),
-      ...(categoryId ? [{ categories: { some: { categoryId: BigInt(categoryId) } } }] : []),
-      ...(search
-        ? [
-            {
-              OR: [
-                { title: { contains: search, mode: 'insensitive' } },
-                { abstract: { contains: search, mode: 'insensitive' } },
-                { publicationNumber: { contains: search, mode: 'insensitive' } },
-              ],
-            },
-          ]
-        : []),
-    ],
-  };
+const listPatents = async ({ page = 1, limit = 20, ...filters }, user) => {
+  const where = access.buildListFilter(filters, user);
 
   const [total, patents] = await prisma.$transaction([
     prisma.patent.count({ where }),
     prisma.patent.findMany({
       where,
       include: PATENT_INCLUDE,
-      orderBy: { createdAt: 'desc' },
+      // Tie-broken by id: `createdAt` alone is not unique, and rows sharing a
+      // timestamp can otherwise appear on two pages or on neither.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * limit,
       take: limit,
     }),
@@ -302,62 +101,55 @@ const listPatents = async ({ page = 1, limit = 20, status, categoryId, submitted
   return { patents, total, page, limit, totalPages: Math.ceil(total / limit) || 1 };
 };
 
-const getPatentById = (id, user) => findVisiblePatent(id, user);
+const getPatentById = (id, user) => access.findVisiblePatent(id, user);
 
 /**
- * Edits are allowed only while a patent is not under review or public.
+ * Edits are allowed only before review and after rejection.
  *
- * A content change bumps `version`; metadata-only changes (categories,
- * inventors, jurisdiction) do not. `version` is half of the downstream
- * idempotency key, so bumping it on every edit would force the Search Service
- * to re-embed a document whose text never changed.
+ * A content change bumps `version`; category, inventor and metadata edits do
+ * not. `version` identifies content downstream, so bumping it for a category
+ * fix would make the Search Service re-embed text that never changed.
  */
 const updatePatent = async (id, updates, user) => {
-  const patent = await findOwnedPatent(id, user);
+  const patent = await access.findOwnedPatent(id, user);
 
-  if (![STATUS.DRAFT, STATUS.DECLINED].includes(patent.status)) {
+  if (!EDITABLE_STATUSES.includes(patent.status)) {
     throw conflict(`A patent with status "${patent.status}" cannot be edited`);
   }
 
-  // Verified against the *caller*, not the submitter: an admin editing someone
-  // else's patent uploads under their own id, so checking the submitter's
-  // namespace would reject every admin document replacement.
-  if (updates.documentKey && updates.documentKey !== patent.documentKey) {
-    await verifyDocument(updates.documentKey, user.userId, { allowPatentId: id });
+  const replacingDocument = updates.documentKey && updates.documentKey !== patent.documentKey;
+
+  if (replacingDocument) {
+    // Verified against the *caller*, not the submitter: an admin editing
+    // someone else's patent uploads under their own id, so checking the
+    // submitter's namespace would reject every admin document replacement.
+    await documents.verifyDocument(updates.documentKey, user.userId, { allowPatentId: id });
   }
 
-  if (updates.publicationNumber && updates.publicationNumber !== patent.publicationNumber) {
-    const clash = await prisma.patent.findUnique({
-      where: { publicationNumber: updates.publicationNumber },
-    });
-    if (clash && clash.id !== patent.id) {
-      throw conflict('A patent with that publication number already exists');
-    }
+  await assertPublicationNumberFree(updates.publicationNumber, id);
+
+  const inventorLinks =
+    updates.inventors !== undefined ? await relations.resolveInventorLinks(updates.inventors) : null;
+  const categoryIds =
+    updates.categoryIds !== undefined
+      ? await relations.resolveCategoryIds(updates.categoryIds)
+      : null;
+
+  const scalar = {};
+  for (const field of [...CONTENT_FIELDS, ...METADATA_FIELDS]) {
+    if (updates[field] !== undefined) scalar[field] = updates[field];
   }
 
   const contentChanged = CONTENT_FIELDS.some(
     (field) => updates[field] !== undefined && updates[field] !== patent[field],
   );
 
-  const inventorLinks =
-    updates.inventors !== undefined ? await resolveInventorLinks(updates.inventors) : null;
-  const categoryIds =
-    updates.categoryIds !== undefined ? await resolveCategoryIds(updates.categoryIds) : null;
-
-  const scalar = {};
-  for (const field of [...CONTENT_FIELDS, 'publicationNumber', 'jurisdiction']) {
-    if (updates[field] !== undefined) scalar[field] = updates[field];
-  }
-
-  const replacedKey =
-    updates.documentKey && updates.documentKey !== patent.documentKey ? patent.documentKey : null;
-
   const updated = await prisma.$transaction(async (tx) => {
     // Re-assert editability inside the transaction. Without the status in the
-    // WHERE clause an edit could land on a patent that was submitted for review
-    // a millisecond earlier, silently mutating something under review.
+    // WHERE clause an edit could land on a patent submitted for review a
+    // millisecond earlier, silently mutating something under review.
     const { count } = await tx.patent.updateMany({
-      where: { id, status: { in: [STATUS.DRAFT, STATUS.DECLINED] } },
+      where: { id, status: { in: EDITABLE_STATUSES } },
       data: { ...scalar, ...(contentChanged ? { version: { increment: 1 } } : {}) },
     });
 
@@ -383,97 +175,70 @@ const updatePatent = async (id, updates, user) => {
     return tx.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
   });
 
-  // Only after the row is committed: the old object is unreferenced now, and
-  // leaving it would accumulate one orphan per document replacement.
-  if (replacedKey) await storageService.deleteObject(replacedKey);
+  // Only once the row is committed: the old object is unreferenced now, and
+  // leaving it would accumulate an orphan per document replacement.
+  if (replacingDocument) await documents.discardObject(patent.documentKey);
 
   return updated;
 };
 
 const submitForReview = async (id, user) => {
-  const patent = await findOwnedPatent(id, user);
+  const patent = await access.findOwnedPatent(id, user);
+
   assertTransition(patent, 'submit');
 
   if (!patent.documentKey) {
-    throw badRequest('A patent cannot be submitted without an uploaded document');
+    throw conflict('A patent cannot be submitted without an uploaded document');
   }
 
   return prisma.$transaction((tx) =>
-    applyTransition(tx, id, 'submit', { submittedAt: new Date() }),
+    applyTransition(tx, id, 'submit', { submittedAt: new Date() }, PATENT_INCLUDE),
   );
 };
 
 /**
- * Approval is the moment a patent joins the corpus, so this is where the
- * event is emitted — status update, review row, and outbox row in one
- * transaction (FR7). If any of the three fails, none of them happened.
+ * Records an admin decision and, when the decision changes corpus membership,
+ * enqueues the event describing it — all in one transaction, so the event can
+ * never diverge from the status that produced it.
  */
-const approvePatent = async (id, { comments }, admin) => {
+const review = async (id, action, { decision, comments }, admin, buildEvent) => {
   const patent = await prisma.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
+
   if (!patent) throw notFound('Patent not found');
 
-  assertTransition(patent, 'approve');
+  assertTransition(patent, action);
 
   return prisma.$transaction(async (tx) => {
-    const updated = await applyTransition(tx, id, 'approve', { reviewedAt: new Date() });
+    // Re-read inside the transaction: whether this decision changes corpus
+    // membership depends on the status the write actually landed on, not on
+    // what a read before the transaction happened to see.
+    const before = await tx.patent.findUnique({ where: { id }, select: { status: true } });
+    const updated = await applyTransition(
+      tx,
+      id,
+      action,
+      { reviewedAt: new Date() },
+      PATENT_INCLUDE,
+    );
 
     await tx.patentReview.create({
       data: {
         patentId: id,
         reviewerId: admin.userId,
         reviewStage: 'admin_review',
-        decision: 'pass',
+        decision,
         comments: comments || null,
       },
     });
 
-    await outboxService.enqueue(tx, {
-      aggregateType: AGGREGATE_TYPE,
-      aggregateId: id,
-      eventType: EVENT_TYPES.UPSERTED,
-      payload: patentVersionUpserted(updated),
-    });
+    const event = buildEvent(updated, before.status);
 
-    return updated;
-  });
-};
-
-/**
- * Declining an *approved* patent also withdraws it from the corpus, so a
- * consumer that already indexed it removes it. Declining one that was only
- * pending emits nothing — it never entered the corpus in the first place.
- */
-const declinePatent = async (id, { comments }, admin) => {
-  const patent = await prisma.patent.findUnique({ where: { id }, include: PATENT_INCLUDE });
-  if (!patent) throw notFound('Patent not found');
-
-  assertTransition(patent, 'decline');
-
-  return prisma.$transaction(async (tx) => {
-    // Re-read inside the transaction: whether this decline withdraws the patent
-    // from the corpus depends on the status it actually had when the write
-    // landed, not on what a read before the transaction happened to see.
-    const before = await tx.patent.findUnique({ where: { id }, select: { status: true } });
-    const wasApproved = before?.status === STATUS.APPROVED;
-
-    const updated = await applyTransition(tx, id, 'decline', { reviewedAt: new Date() });
-
-    await tx.patentReview.create({
-      data: {
-        patentId: id,
-        reviewerId: admin.userId,
-        reviewStage: 'admin_review',
-        decision: 'fail',
-        comments,
-      },
-    });
-
-    if (wasApproved) {
+    if (event) {
       await outboxService.enqueue(tx, {
         aggregateType: AGGREGATE_TYPE,
         aggregateId: id,
-        eventType: EVENT_TYPES.WITHDRAWN,
-        payload: patentVersionWithdrawn(updated, 'declined'),
+        eventType: event.event_type,
+        payload: event,
       });
     }
 
@@ -481,12 +246,28 @@ const declinePatent = async (id, { comments }, admin) => {
   });
 };
 
+/** Approval is the moment a patent joins the corpus, so it always emits. */
+const approvePatent = (id, { comments }, admin) =>
+  review(id, 'approve', { decision: 'pass', comments }, admin, (patent) =>
+    patentVersionUpserted(patent),
+  );
+
+/**
+ * Declining an *approved* patent withdraws it from the corpus. Declining one
+ * that was only pending emits nothing — it never entered the corpus, so there
+ * is nothing downstream to remove.
+ */
+const declinePatent = (id, { comments }, admin) =>
+  review(id, 'decline', { decision: 'fail', comments }, admin, (patent, previousStatus) =>
+    previousStatus === STATUS.APPROVED ? patentVersionWithdrawn(patent, 'declined') : null,
+  );
+
 /**
  * Hard delete, drafts only. Anything that has been through review is retained:
- * a review trail that can be erased by its subject is not a review trail.
+ * a review trail its subject can erase is not a review trail.
  */
 const deletePatent = async (id, user) => {
-  const patent = await findOwnedPatent(id, user);
+  const patent = await access.findOwnedPatent(id, user);
 
   if (patent.status !== STATUS.DRAFT) {
     throw conflict(`Only a draft can be deleted; this patent is "${patent.status}"`);
@@ -503,20 +284,16 @@ const deletePatent = async (id, user) => {
     }
   });
 
-  // Safe to remove now: documentKey is unique, so no other patent can be
-  // pointing at this object.
-  await storageService.deleteObject(patent.documentKey);
+  // Safe now: documentKey is unique, so nothing else points at this object.
+  await documents.discardObject(patent.documentKey);
 };
 
 /**
- * Review history is owner-or-admin, not "anyone who can see the patent".
- *
- * Comments are internal examiner notes and each row names the reviewing admin.
- * Gating on visibility alone would publish both to every signed-up user the
- * moment a patent is approved.
+ * Owner-or-admin, not merely "can see the patent": comments are internal
+ * examiner notes and every row names the reviewing admin.
  */
 const listReviews = async (id, user) => {
-  await findOwnedPatent(id, user);
+  await access.findOwnedPatent(id, user);
 
   return prisma.patentReview.findMany({
     where: { patentId: id },
@@ -525,24 +302,15 @@ const listReviews = async (id, user) => {
   });
 };
 
-const getDocumentUrl = async (id, user) => {
-  const patent = await findVisiblePatent(id, user);
+const getDocumentUrl = async (id, user) =>
+  documents.presignDownload(await access.findVisiblePatent(id, user));
 
-  if (!patent.documentKey) throw notFound('This patent has no attached document');
-
-  return {
-    downloadUrl: await storageService.presignDownload(patent.documentKey),
-    expiresAt: new Date(Date.now() + config.storage.downloadUrlTtlSeconds * 1000),
-  };
-};
-
-const requestUpload = ({ filename, contentType }, user) =>
-  storageService.presignUpload({ userId: user.userId, filename, contentType });
+const requestUpload = (input, user) => documents.requestUpload(input, user);
 
 module.exports = {
   STATUS,
   PATENT_INCLUDE,
-  visibilityWhere,
+  visibilityWhere: access.visibilityWhere,
   requestUpload,
   createPatent,
   listPatents,

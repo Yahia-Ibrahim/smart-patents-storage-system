@@ -25,18 +25,31 @@ const baseOptions = {
  * skipSuccessfulRequests means a legitimate user typing one wrong password
  * then the right one never burns quota.
  */
+/**
+ * Named and exported rather than inlined, because it is the whole of the
+ * brute-force policy and express-rate-limit does not expose it back off the
+ * middleware — so inline, it could not be tested.
+ *
+ * Keyed on IP *and* email: an attacker spraying one password across many
+ * accounts is throttled per target, and a shared office NAT does not lock
+ * everyone out because one colleague fatfingered their password. The email is
+ * lowercased and trimmed so varying case cannot buy a fresh quota.
+ *
+ * ipKeyGenerator collapses an IPv6 address to its /64 prefix; using req.ip raw
+ * would let an IPv6 client rotate through addresses it already controls.
+ */
+const loginRateLimitKey = (req) => {
+  const email = typeof req.body?.email === 'string' ? req.body.email.toLowerCase().trim() : '';
+
+  return `${ipKeyGenerator(req.ip)}:${email}`;
+};
+
 const loginLimiter = rateLimit({
   ...baseOptions,
   windowMs: 15 * 60 * 1000,
   limit: 10,
   skipSuccessfulRequests: true,
-  keyGenerator: (req) => {
-    const email = typeof req.body?.email === 'string' ? req.body.email.toLowerCase().trim() : '';
-    // ipKeyGenerator collapses an IPv6 address to its /64 prefix. Using req.ip
-    // raw would let an IPv6 client rotate through the addresses it already
-    // controls and get a fresh quota for each one.
-    return `${ipKeyGenerator(req.ip)}:${email}`;
-  },
+  keyGenerator: loginRateLimitKey,
 });
 
 // Signup is IP-keyed only: there is no account to target yet, so this is about
@@ -55,4 +68,4 @@ const refreshLimiter = rateLimit({
   limit: 60,
 });
 
-module.exports = { loginLimiter, signupLimiter, refreshLimiter };
+module.exports = { loginRateLimitKey, loginLimiter, signupLimiter, refreshLimiter };

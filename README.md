@@ -303,9 +303,15 @@ Postgres and nothing else** — object storage and Kafka are replaced by in-memo
 (`tests/fakes.js`), because a suite that requires a full compose stack is a suite that stops
 being run.
 
-214 tests across 10 files: auth and sessions, role authorization, profiles, admin management,
-the full patent lifecycle and its illegal transitions, cross-user visibility, uploads and
-document access, categories, inventors, and the outbox/relay.
+367 tests across 18 files, at ~92% statement and ~85% branch coverage: auth and sessions,
+role authorization, profiles, admin management, the full patent lifecycle and its illegal
+transitions, cross-user visibility, uploads and document access, categories, inventors, the
+outbox and the relay loop, readiness probes, rate-limit keying, and request ids.
+
+`tests/unit/` holds the fast ones — the state machine, the visibility filter, error handling,
+boot-time config guards, and token/key handling — driven directly rather than through HTTP.
+Reaching a transition table through a login, an upload and a patent per case is why the illegal
+combinations were never enumerated before.
 
 `tests/patents.review.test.js` is separate on purpose: each test there pins a defect found by
 code review rather than by running the suite — concurrent approvals, concurrent idempotent

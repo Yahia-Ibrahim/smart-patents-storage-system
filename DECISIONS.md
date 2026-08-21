@@ -4,8 +4,8 @@ Things I chose without being able to ask, and things still outstanding. Nothing 
 blocks further work — every item has a working implementation behind it. Reverse
 anything you disagree with; the reasoning is recorded so you can weigh it.
 
-Last updated: 2026-08-21, after implementing the Patents Module and acting on an
-external code review.
+Last updated: 2026-08-21, after implementing the Patents Module, acting on an
+external code review, and a clean-code and test-coverage pass.
 
 ---
 
@@ -63,6 +63,28 @@ retained — a review trail its subject can erase is not a review trail.
 changes, not on category or inventor edits, so a metadata fix does not force downstream
 re-embedding.
 
+### Structure (added during the clean-code pass)
+
+**`patentService.js` was split, `userService.js` was not.** The patents service had grown to
+557 lines covering five separate concerns — visibility, the state machine, documents, link
+validation, and workflow — and each was only reachable through an HTTP request, which is why
+whole categories of edge case went untested. It is now an orchestrator over
+`services/patents/{access,lifecycle,documents,relations}.js`.
+
+`userService.js` (296 lines) also mixes concerns — sessions, profile, admin — and by the same
+rule should probably be split too. I left it alone deliberately: it is heavily tested auth code
+that is not currently causing trouble, and churning it carries more risk than the tidiness is
+worth. **If you want consistency, splitting it into `sessions` / `profile` / `administration`
+is the obvious cut.**
+
+**Two behaviour changes came out of the same pass**, both small but visible:
+
+- Submitting a patent with no document is now `409` rather than `400`. It is a state problem,
+  not a malformed request.
+- Duplicate `categoryIds` are now rejected (`400`) instead of silently deduplicated, matching
+  how duplicate inventors were already handled. Silent dedup hides a client bug until someone
+  notices the returned count differs from what they sent.
+
 ---
 
 ## 2. Open questions for you
@@ -99,7 +121,7 @@ re-embedding.
 | Offset pagination everywhere | Fine at current scale, wrong past ~100k rows. Cursor pagination is a breaking API change, so it wanted your input. |
 | No alerting on `deadLettered` | `/ready` reports it; nothing pages anyone. |
 | `PATENT.s3_file_url` | Superseded by `document_key`, now nullable and unwritten. Left in place so dropping it is a deliberate migration rather than a surprise. |
-| No CI | No `.github/workflows`, no linter, despite an `eslint-disable` comment in the codebase. Wanted your choice of CI provider. |
+| No CI | No `.github/workflows`, no linter, despite an `eslint-disable` comment in the codebase. Wanted your choice of CI provider. The suite is at ~92% statements / ~85% branches and takes ~3 min, so it is ready to gate on. |
 | Rotated secrets in git history | An old `JWT_SECRET` and `DATABASE_URL` remain at commit `b767bd7`. Both are rotated and inert, but history is not clean — relevant only if this repo goes public. |
 
 ---

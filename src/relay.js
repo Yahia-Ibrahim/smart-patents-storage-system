@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const prisma = require('./config/prisma');
 const { start } = require('./workers/outboxRelay');
 
 /**
@@ -10,9 +11,12 @@ start()
   .then(({ stop }) => {
     console.log('[outbox-relay] started');
 
+    // The entrypoint owns the process, so releasing the database pool is its
+    // job rather than the worker's.
     const shutdown = async (signal) => {
       console.log(`[outbox-relay] ${signal} received, stopping`);
       await stop();
+      await prisma.$disconnect();
       process.exit(0);
     };
 

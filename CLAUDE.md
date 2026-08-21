@@ -92,6 +92,16 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
   DTO. No business logic or Prisma here. Users, patents, inventors, and categories are all
   implemented; there are no stubs left.
 - `src/services/` — business logic and all database access.
+- `src/services/patents/` — the patents module split by concern, because one
+  557-line service mixing all of them was hard to reason about and impossible to
+  unit test. `patentService.js` orchestrates and holds no rules of its own:
+  - `access.js` — visibility and ownership. **Every** patent read and write goes
+    through `findVisiblePatent` / `findOwnedPatent` / `buildListFilter`.
+  - `lifecycle.js` — the status transition table and its two guards.
+  - `documents.js` — upload/download presigning and document ownership.
+  - `relations.js` — category and inventor link validation.
+- `src/utils/validation/` — chains split by domain (`shared`, `users`, `patents`,
+  `catalog`) behind an index barrel; `require('../utils/validation')` is unchanged.
 - `src/middlewares/auth.js` — `requireAuth` verifies the access token and sets
   `req.user = { userId: BigInt, role }`; `requireRole(...roles)` gates by role. Convenience
   arrays `requireUser` (user|admin) and `requireAdmin` are what routes actually spread in.
@@ -177,6 +187,9 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
 - **Emails are viewer-scoped in DTOs** (`canSeeEmailOf`): an address goes out only to an admin
   or its owner. Any signed-up user can read approved patents and search the inventor directory,
   so unconditional emails would publish the whole user/admin directory.
+- **Inventor order must be a contiguous 1..N**, and `order` is all-or-nothing across
+  the list. Duplicate category ids are rejected rather than silently deduplicated —
+  a repeated id means the client built the request wrong.
 - **`GET /patents/:id/reviews` is owner-or-admin**, not merely "can see the patent" — review
   comments are internal notes and name the reviewing admin.
 - **Object keys are derived server-side** and namespaced by user id. A client-supplied key is a
