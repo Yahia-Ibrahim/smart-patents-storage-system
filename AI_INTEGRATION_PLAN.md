@@ -182,7 +182,7 @@ Found while reading, and left alone. Recorded for the owning engineer.
 
 | Area | Issue |
 |---|---|
-| AI tests | `tests/test_indexing_service.py` and `test_kafka_consumer.py` call `index_patent` / `approve_patent` / `reject_patent`, which **do not exist** on `IndexingService` (the methods are `handle_*_patent`). `test_kafka_consumer` also asserts the handler receives a raw dict where the code passes a validated DTO. Pre-existing and unrelated to integration, but it means their suite does not currently protect the code it covers. |
+| AI tests | **Their suite cannot complete.** Ran it in the built image: 4 pass, 3 fail, 2 hang. The three failures are `AttributeError: 'IndexingService' object has no attribute 'index_patent'` (also `approve_patent`, `reject_patent`) — the methods are named `handle_*_patent`. `test_kafka_consumer.py` then **hangs forever**: `consume_messages` only increments `count` on success, and its `if msg is None: continue` has no exit, so once the dispatch raises (the dummy service has the same wrong method names) a `max_messages=1` call polls an exhausted dummy consumer for eternity. Entirely pre-existing — none of these tests touch the two methods this integration changed. |
 | AI startup | `VectorStoreService.__init__` calls Qdrant during `build_indexing_service()`, so the process crashes at boot if Qdrant is briefly unavailable. No retry/backoff. |
 | AI errors | `consume_messages` catches every exception and `continue`s with auto-commit on — a failed message is silently dropped, never retried, no DLQ. |
 | AI config | `settings.py` is empty; config is scattered `os.getenv` calls with inline defaults. `AdminRecord` table is defined and never used. |
