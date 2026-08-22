@@ -278,7 +278,10 @@ services:
   # It is a Kafka consumer, not an HTTP service - there is no port to publish.
 
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    # Pinned to match the qdrant-client version in AI_module/requirements.txt.
+    # Its client refuses more than one minor of drift and warns loudly below
+    # that, so the two move together.
+    image: qdrant/qdrant:v1.18.0
     container_name: patents-qdrant
     ports:
       # 6333 REST, 6334 gRPC. Published for debugging via the dashboard at
@@ -295,6 +298,10 @@ services:
     build:
       context: ./AI_module
       dockerfile: dockerfile
+    # Pinned so `docker build -t patents-ai:dev ./AI_module` and compose share
+    # one image. The torch wheel makes this an 8.7GB build; having two tags of
+    # it because compose names images after the project is not worth the disk.
+    image: patents-ai:dev
     container_name: patents-ai-service
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092

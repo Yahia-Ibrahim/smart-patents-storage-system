@@ -183,9 +183,21 @@ class IndexingService:
         self._insert_embedding_into_vector_store(payload, embedding)
 
     def handle_rejected_patent(self, payload: PatentRejectedEventDTO) -> None:
-        """Handle rejection of a patent by removing the embedding from the embedding repository if present."""
+        """Handle rejection of a patent by removing it from the cache and the vector store."""
         if self.embedding_repository is not None:
             try:
                 self.embedding_repository.delete_embedding(payload.patentId)
+            except Exception:
+                pass
+
+        # The vector store removal was missing, so a patent that was approved
+        # and later declined stayed in the similarity corpus permanently and
+        # kept being returned as prior art for new submissions. Kept as its own
+        # guarded block rather than sharing the one above: a failure to clear
+        # the cache must not skip removing the vector, which is the half that
+        # is externally visible.
+        if self.vector_store_service is not None:
+            try:
+                self.vector_store_service.delete_embedding(payload.patentId)
             except Exception:
                 return

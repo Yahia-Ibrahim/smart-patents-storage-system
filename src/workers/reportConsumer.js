@@ -1,5 +1,5 @@
 const config = require('../config/env');
-const { getConsumer } = require('../config/kafka');
+const { getConsumer, ensureTopic } = require('../config/kafka');
 const aiReportService = require('../services/aiReportService');
 
 /**
@@ -60,6 +60,11 @@ const handleMessage = async ({ message }) => {
 };
 
 const start = async () => {
+  // Before subscribing: on a cold stack the AI service has not published yet,
+  // so the topic does not exist, and subscribing to an unknown topic fails the
+  // consumer's metadata refresh rather than waiting for it to appear.
+  await ensureTopic(config.kafka.aiReportTopic);
+
   const consumer = getConsumer();
 
   await consumer.connect();

@@ -27,8 +27,10 @@ npm run prisma:seed      # seed the initial admin from env vars
 npm run prisma:studio    # prisma studio
 npm run relay            # outbox -> Kafka relay (its own process; see Messaging below)
 npm run relay:dev        # same, under nodemon
+npm run consumer         # AI similarity reports -> PATENT_REVIEW (its own process)
+npm run consumer:dev     # same, under nodemon
 npm run connect:register -- <template>   # register/update a Kafka Connect connector, see kafka-connect/README.md
-docker compose up        # backend + relay + postgres (:5433) + minio (:9000/:9001) + kafka (:29092) + kafka-connect (:8083) + kafka-ui (:8080)
+docker compose up        # backend + relay + ai-reports + postgres (:5433) + minio (:9000/:9001) + kafka (:29092) + kafka-connect (:8083) + kafka-ui (:8080) + qdrant (:6333) + ai-service
 ```
 
 **Use `127.0.0.1`, not `localhost`, in host-facing URLs.** Docker publishes on `0.0.0.0`
@@ -52,6 +54,13 @@ Two harness details that will confuse you if you don't know them:
   suite from 265s to 25s. Scoped to the test DB only.
 - **New tables must be added to the `TRUNCATE` list in `tests/setup.js`**, which is hardcoded.
   Forgetting leaks state across tests in ways that are painful to debug.
+
+**The AI service's database is created by `docker/postgres-init/`, which Postgres only runs on an
+empty data directory.** An existing install needs it once by hand:
+
+```bash
+docker compose exec postgres psql -U patents -c 'CREATE DATABASE ai_db'
+```
 
 ## Frontend (`frontend/`)
 
@@ -225,10 +234,60 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
   `(patent_id, version)` is not a safe dedup key on its own — approve → decline → re-approve
   repeats the same version — so consumers should order by `sequence` and dedup on `event_id`.
 - Only **approval** emits `PatentVersionUpserted`; declining a previously approved patent emits
-  `PatentVersionWithdrawn`. Creating, submitting, and editing emit nothing.
+  `PatentVersionWithdrawn`. Creating, submitting, and editing emit nothing **on this contract** —
+  submission does emit to the AI service, which is a separate contract; see below.
+- **An outbox row carries its own destination `topic`.** Null means the default
+  `patents.events`, which is what every row meant before the AI integration. The relay resolves
+  it; nothing routes by inspecting event type.
 - **Debezium remains unregistered.** The infra is staged in compose, but the hand-written relay
   publishes clean *domain* events rather than row-shaped CDC records. Don't wire up a connector
   without deciding what consumers should see.
+
+## AI service integration
+
+`AI_module/` is a **Python Kafka consumer owned by another team** — not an HTTP API, so there is
+no endpoint to call and no port to publish. Treat it as an external dependency: make the smallest
+change that makes integration work, and record anything else rather than fixing it.
+
+- **The backend adapts to the AI's contract, not the reverse.** `src/events/aiEvents.js` builds a
+  flat, camelCase payload matching its pydantic DTOs. This is deliberately *not* merged with
+  `patentEvents.js`: two published interfaces, two owners, and a change requested by one consumer
+  must not silently break the other.
+- **Two contracts, one outbox.** Every AI event is enqueued in the same transaction as the state
+  change, exactly like a domain event. The "never publish from a request handler" rule is not
+  relaxed for it.
+
+  | Moment | `patents.events` | AI topics |
+  |---|---|---|
+  | submit | *(silent)* | `Patents.submitted` |
+  | approve | `PatentVersionUpserted` | `Patents.approved` |
+  | decline after approval | `PatentVersionWithdrawn` | `Patents.rejected` |
+  | decline, never approved | *(silent)* | `Patents.rejected` |
+
+  The last row is the asymmetry worth remembering: the domain contract stays silent because
+  nothing ever entered the search corpus, but the AI cached an embedding at submission and has
+  state to drop.
+- **The AI is advisory and gates nothing.** `submit → pending_admin` is unchanged and `pending_ai`
+  stays unimplemented, so a dead AI service can never block a submission.
+- **Documents travel as `s3://bucket/key` URIs, never presigned URLs.** A presigned URL expires
+  while its event sits in the outbox or on the topic, so any outage longer than the TTL would
+  strand events that can never be processed. The AI resolves the URI with its own MinIO
+  credentials.
+- **Reports come back on `Notifications.similarity-report`** and are consumed by
+  `npm run consumer` (`src/workers/reportConsumer.js`), a **separate process** like the relay.
+  They land as `PATENT_REVIEW` rows with the reserved `reviewStage: ai_filter` and
+  `aiConfidenceScore` (stored as a **percentage**, since the column is `Decimal(5,2)`), so no new
+  table was needed and they surface through the existing owner-or-admin
+  `GET /patents/:id/reviews`.
+- **The report consumer discards bad messages rather than retrying** — the opposite of the
+  relay's head-of-line blocking, and deliberately so: there the payload is ours and a failure
+  means our bug, here it comes from another team and will be just as bad on every retry. A
+  *database* failure still throws, so the offset stays uncommitted and the message is redelivered.
+- **Only approved patents enter Qdrant**, so a similarity report can only ever name a patent that
+  is already public. That is what makes it safe to show one to a submitter.
+- Changes made to `AI_module/` are limited to `_download_document` (s3 support), the
+  `requirements.txt` encoding, and a `.env.example`. Everything else found while reading is
+  recorded in `AI_INTEGRATION_PLAN.md`, not fixed.
 
 ## Known issues
 

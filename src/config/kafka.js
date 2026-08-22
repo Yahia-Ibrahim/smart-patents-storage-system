@@ -91,6 +91,36 @@ const setConsumer = (replacement) => {
   consumer = replacement;
 };
 
+/**
+ * Ensures a topic exists, so subscribing to one nothing has published to yet
+ * is not a startup crash.
+ *
+ * The report topic is created by the AI service the first time it publishes,
+ * which on a cold stack happens *after* this consumer starts — and a KafkaJS
+ * consumer subscribing to an unknown topic fails its metadata refresh outright
+ * rather than waiting. Creating it here is idempotent and costs one admin
+ * round trip at boot.
+ */
+const ensureTopic = async (topic) => {
+  const admin = buildKafka().admin();
+
+  try {
+    await admin.connect();
+
+    // Checked first rather than calling createTopics unconditionally: KafkaJS
+    // handles the already-exists case correctly but logs it at ERROR, which
+    // puts an alarming line in the log on every single restart for what is the
+    // normal path.
+    const existing = await admin.listTopics();
+    if (existing.includes(topic)) return;
+
+    await admin.createTopics({ topics: [{ topic, numPartitions: 1 }], waitForLeaders: true });
+    console.log(`[kafka] created topic ${topic}`);
+  } finally {
+    await admin.disconnect().catch(() => {});
+  }
+};
+
 module.exports = {
   getProducer,
   setProducer,
@@ -98,4 +128,5 @@ module.exports = {
   disconnectProducer,
   getConsumer,
   setConsumer,
+  ensureTopic,
 };

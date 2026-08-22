@@ -260,6 +260,56 @@ Both are defined in [`src/events/patentEvents.js`](src/events/patentEvents.js). 
 shape as a published interface**: adding optional fields is safe, renaming or removing one is a
 breaking change.
 
+## The AI service
+
+[`AI_module/`](AI_module/) is a Python Kafka consumer owned by another team. It embeds patent
+documents, indexes them in Qdrant, and reports which existing patents a new submission resembles.
+It has **no HTTP API** — there is nothing to call.
+
+It consumes a different contract from the one above: three topics, and a flat payload its
+pydantic DTOs already parse. The backend publishes both from the same outbox rather than asking
+another team to rewrite their service.
+
+| Moment | `patents.events` | AI topic |
+|---|---|---|
+| submit | *(silent)* | `Patents.submitted` |
+| approve | `PatentVersionUpserted` | `Patents.approved` |
+| decline after approval | `PatentVersionWithdrawn` | `Patents.rejected` |
+| decline, never approved | *(silent)* | `Patents.rejected` |
+
+That last row is the asymmetry to remember: nothing ever entered the search corpus, so there is
+nothing to withdraw — but the AI cached an embedding at submission time and has state to drop.
+
+```jsonc
+// Patents.submitted / .approved / .rejected
+{
+  "eventId": "3f2c…",           // uuid
+  "patentId": 143,               // int, not a string
+  "title": "A self-cooling beverage container",
+  "applicationNumber": "US9876543",   // "PENDING-<id>" when unpublished
+  "fileUrl": "s3://patents/patents/7/<uuid>/spec.pdf",
+  "submittedBy": 7,
+  "submittedAt": "2026-08-22T10:15:00.000Z"
+}
+```
+
+**`fileUrl` is an `s3://` URI, not a presigned URL.** A presigned URL would expire while the
+event sat in the outbox or on the topic, so any AI outage longer than the TTL would strand
+events that could never be processed. The AI service resolves the URI with its own credentials.
+
+**The AI is advisory. It gates nothing** — `submit → pending_admin` is unchanged, and a dead AI
+service can never block a submission.
+
+### Reports coming back
+
+The AI publishes a similarity report on `Notifications.similarity-report`. `npm run consumer`
+records it as a `PATENT_REVIEW` row with `stage: ai_filter`, an `aiConfidenceScore` (the top
+match, as a **percentage**) and the matches in `comments`. It surfaces through the existing
+`GET /patents/:id/reviews`, which is owner-or-admin.
+
+Only *approved* patents are ever indexed, so a report can only name a patent that is already
+public — which is what makes it safe to show a submitter.
+
 ## Health and readiness
 
 | Path      | Purpose                                                                       |
@@ -337,11 +387,21 @@ npm run prisma:seed      # seed the initial admin
 npm run prisma:studio    # prisma studio
 npm run relay            # outbox -> Kafka relay process
 npm run relay:dev        # same, under nodemon
-docker compose up        # backend + relay + postgres + minio + kafka + connect + kafka-ui
+npm run consumer         # AI similarity reports -> PATENT_REVIEW
+npm run consumer:dev     # same, under nodemon
+docker compose up        # everything: backend + relay + ai-reports + postgres + minio
+                         # + kafka + connect + kafka-ui + qdrant + ai-service
 ```
+
+The three Node processes are separate on purpose: the API neither produces to Kafka nor consumes
+from it, which is what keeps request latency independent of broker health. Run **exactly one**
+relay; the report consumer can be scaled.
 
 ## Not in scope here
 
-Embeddings, vector search, similarity scoring, and AI pre-screening belong to a separate
-service that consumes `patents.events`. This service deliberately knows nothing about them —
-`pending_ai` and `ReviewStage.ai_filter` are reserved in the schema and unused in code.
+Embeddings, vector search, and similarity scoring belong to the AI service in
+[`AI_module/`](AI_module/), which is owned by another team — see "The AI service" above. This
+service integrates with it over Kafka and knows nothing about how it works.
+
+AI **pre-screening as a lifecycle gate** is still unimplemented: `pending_ai` remains reserved in
+the schema and unused in code. The AI is advisory only.
