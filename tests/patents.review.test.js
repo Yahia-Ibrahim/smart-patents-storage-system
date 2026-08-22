@@ -206,7 +206,13 @@ describe('concurrency', () => {
 
     expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
     expect(await prisma.patentReview.count()).toBe(1);
-    expect(await prisma.outboxEvent.count()).toBe(1);
+    // One approval's worth of events, not two: the domain upsert plus the AI
+    // event, on top of the submit event from earlier in the test.
+    expect(await prisma.outboxEvent.findMany({ orderBy: { id: 'asc' } })).toEqual([
+      expect.objectContaining({ eventType: 'PatentSubmitted' }),
+      expect.objectContaining({ eventType: 'PatentVersionUpserted' }),
+      expect.objectContaining({ eventType: 'PatentApproved' }),
+    ]);
   });
 
   /**

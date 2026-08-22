@@ -15,7 +15,9 @@
     "test": "cross-env NODE_ENV=test jest --runInBand",
     "test:watch": "cross-env NODE_ENV=test jest --runInBand --watch",
     "relay": "node src/relay.js",
-    "relay:dev": "nodemon src/relay.js"
+    "relay:dev": "nodemon src/relay.js",
+    "consumer": "node src/consumer.js",
+    "consumer:dev": "nodemon src/consumer.js"
   },
   "jest": {
     "testEnvironment": "node",

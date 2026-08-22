@@ -76,7 +76,41 @@ services:
       - patents-net
     restart: unless-stopped
 
-  postgres:
+  # The AI report consumer: the only thing in this system that consumes from
+  # Kafka. Separate from the API for the same reason as the relay - every API
+  # replica would otherwise join the consumer group and compete for partitions.
+  #
+  # Unlike the relay, this one scales horizontally: Kafka gives each partition
+  # to exactly one consumer in a group.
+  ai-reports:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patents-ai-reports
+    command: ["npm", "run", "consumer"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-patents}:${POSTGRES_PASSWORD:-patents}@postgres:5432/${POSTGRES_DB:-patents}?schema=public
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in your .env}
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-patents}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-admin123123}
+      KAFKA_BROKERS: kafka:9092
+      AI_REPORT_TOPIC: ${AI_REPORT_TOPIC:-Notifications.similarity-report}
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - patents-net
+    restart: unless-stopped
+
+  postgres:
     image: postgres:16-alpine
     container_name: patents-postgres
     # wal_level=logical (plus the sender/slot headroom below) is what lets
@@ -99,6 +133,10 @@ services:
       - "5433:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+      # Creates the AI service's separate database. Postgres only runs these on
+      # an EMPTY data directory, so an existing install needs the CREATE
+      # DATABASE run once by hand - see README.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-patents} -d ${POSTGRES_DB:-patents}"]
       interval: 5s
@@ -226,6 +264,71 @@ services:
         condition: service_healthy
       kafka-connect:
         condition: service_healthy
+    networks:
+      - patents-net
+    restart: unless-stopped
+
+  # --- AI service ------------------------------------------------------------
+  #
+  # Owned by another team; see AI_module/. It consumes Patents.submitted /
+  # .approved / .rejected, embeds the document text, and publishes a similarity
+  # report back on Notifications.similarity-report, which patents-ai-reports
+  # above consumes.
+  #
+  # It is a Kafka consumer, not an HTTP service - there is no port to publish.
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: patents-qdrant
+    ports:
+      # 6333 REST, 6334 gRPC. Published for debugging via the dashboard at
+      # http://127.0.0.1:6333/dashboard; nothing outside the network needs it.
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    networks:
+      - patents-net
+    restart: unless-stopped
+
+  ai-service:
+    build:
+      context: ./AI_module
+      dockerfile: dockerfile
+    container_name: patents-ai-service
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REPORT_TOPIC: ${AI_REPORT_TOPIC:-Notifications.similarity-report}
+      # Its own database on the shared Postgres instance, not the patents
+      # database: its SQLAlchemy models are unmanaged by Prisma, and mixing them
+      # in would show up as schema drift on every migrate diff.
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-patents}:${POSTGRES_PASSWORD:-patents}@postgres:5432/${AI_POSTGRES_DB:-ai_db}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-patents}
+      # Documents arrive as s3://bucket/key URIs and are fetched with these.
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-admin123123}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+      # Must match the model's output dimensions; all-MiniLM-L6-v2 is 384. A
+      # mismatch is only discovered when Qdrant rejects the first upsert.
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      TMP_DIR: /tmp/patents
+      # Cache the model in a volume; without this it re-downloads ~90MB from
+      # Hugging Face on every container start.
+      HF_HOME: /models
+    volumes:
+      - ./data/hf-models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      qdrant:
+        condition: service_started
     networks:
       - patents-net
     restart: unless-stopped

@@ -1,4 +1,12 @@
-const { api, createUser, login, authHeader, approvedPatent, createAdmin } = require('./helpers');
+const {
+  api,
+  createUser,
+  login,
+  authHeader,
+  approvedPatent,
+  createAdmin,
+  seedOutboxEvent,
+} = require('./helpers');
 const { fakeStorage, fakeProducer } = require('./fakes');
 const storageService = require('../src/services/storageService');
 const outboxService = require('../src/services/outboxService');
@@ -38,15 +46,12 @@ describe('GET /ready', () => {
   });
 
   it('counts pending events so a stalled relay is visible', async () => {
-    await createUser({ email: 'inventor@example.com' });
-    await createAdmin();
-    const token = (await login('inventor@example.com')).accessToken;
-    const adminToken = (await login('admin@example.com')).accessToken;
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
+    await seedOutboxEvent();
 
     const res = await api().get('/ready');
 
-    expect(res.body.checks.outbox.pending).toBe(1);
+    expect(res.body.checks.outbox.pending).toBe(2);
   });
 
   it('goes 503 when storage is unreachable', async () => {
@@ -222,11 +227,7 @@ describe('relay resilience', () => {
    * quiet until someone notices the backlog.
    */
   it('survives a pass that throws and resumes afterwards', async () => {
-    await createUser({ email: 'inventor@example.com' });
-    await createAdmin();
-    const token = (await login('inventor@example.com')).accessToken;
-    const adminToken = (await login('admin@example.com')).accessToken;
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     const spy = jest
       .spyOn(outboxService, 'claimBatch')

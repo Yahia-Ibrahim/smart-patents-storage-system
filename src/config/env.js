@@ -91,6 +91,15 @@ const build = () => {
       brokers: parseList(env.KAFKA_BROKERS, externalsRequired ? [] : ['localhost:29092']),
       clientId: env.KAFKA_CLIENT_ID || 'patents-backend',
       patentEventsTopic: env.PATENT_EVENTS_TOPIC || 'patents.events',
+
+      // The AI service's contract. These names are hardcoded on its side
+      // (KafkaPatentConsumer.TOPIC_HANDLERS and NotificationProducer), so they
+      // are only configurable in the sense that both sides move together.
+      aiSubmittedTopic: env.AI_SUBMITTED_TOPIC || 'Patents.submitted',
+      aiApprovedTopic: env.AI_APPROVED_TOPIC || 'Patents.approved',
+      aiRejectedTopic: env.AI_REJECTED_TOPIC || 'Patents.rejected',
+      aiReportTopic: env.AI_REPORT_TOPIC || 'Notifications.similarity-report',
+      aiReportGroupId: env.AI_REPORT_GROUP_ID || 'patents-backend-ai-reports',
     },
 
     outbox: {

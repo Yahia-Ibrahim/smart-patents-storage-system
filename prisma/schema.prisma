@@ -212,6 +212,17 @@ model OutboxEvent {
   aggregateId   BigInt    @map("aggregate_id")
   eventType     String    @map("event_type") @db.VarChar(128)
   payload       Json
+
+  /// Destination topic. Null means "the default patent events topic", which is
+  /// what every row written before the AI integration meant implicitly — so
+  /// existing rows keep publishing exactly where they always did.
+  ///
+  /// This exists because the outbox now feeds two independent contracts: the
+  /// fat domain events on `patents.events`, and the flat `Patents.*` events the
+  /// AI service consumes. Routing by event type in the relay would have hidden
+  /// that fan-out inside a switch statement the writer cannot see.
+  topic         String?   @db.VarChar(255)
+
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
   publishedAt   DateTime? @map("published_at") @db.Timestamptz
 

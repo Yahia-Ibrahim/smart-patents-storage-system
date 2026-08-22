@@ -59,7 +59,9 @@ const publishBatch = async () => {
       }
 
       await producer.send({
-        topic: config.kafka.patentEventsTopic,
+        // A row carries its own destination; null means the default topic,
+        // which is what every row written before the AI integration meant.
+        topic: event.topic || config.kafka.patentEventsTopic,
         messages: [
           {
             // Keyed by aggregate id so every version of one patent lands on

@@ -9,6 +9,7 @@ const {
   approvedPatent,
   createCategory,
   createInventor,
+  seedOutboxEvent,
 } = require('./helpers');
 const { fakeProducer } = require('./fakes');
 const { publishBatch, MAX_PAYLOAD_BYTES } = require('../src/workers/outboxRelay');
@@ -26,12 +27,23 @@ const setup = async () => {
 
 const submit = (id, token) => api().post(`/api/patents/${id}/submit`).set(authHeader(token)).send();
 
+/**
+ * The outbox feeds two independent contracts, so a test has to say which one
+ * it means. A null topic is the default `patents.events` domain stream; a set
+ * topic is one of the AI service's `Patents.*` topics.
+ */
+const domainEvents = () =>
+  prisma.outboxEvent.findMany({ where: { topic: null }, orderBy: { id: 'asc' } });
+
+const aiOutboxEvents = () =>
+  prisma.outboxEvent.findMany({ where: { NOT: { topic: null } }, orderBy: { id: 'asc' } });
+
 describe('outbox writes', () => {
-  it('enqueues exactly one event when a patent is approved', async () => {
+  it('enqueues exactly one domain event when a patent is approved', async () => {
     const { token, adminToken } = await setup();
     const patent = await approvedPatent(token, adminToken);
 
-    const events = await prisma.outboxEvent.findMany();
+    const events = await domainEvents();
 
     expect(events).toHaveLength(1);
     expect(events[0].eventType).toBe('PatentVersionUpserted');
@@ -40,7 +52,7 @@ describe('outbox writes', () => {
     expect(events[0].publishedAt).toBeNull();
   });
 
-  it('writes nothing on create, submit, or edit', async () => {
+  it('writes no domain event on create, submit, or edit', async () => {
     const { token } = await setup();
     const draft = await createDraftPatent(token);
     await api()
@@ -49,8 +61,10 @@ describe('outbox writes', () => {
       .send({ title: 'An amended title for the cooling container' });
     await submit(draft.id, token);
 
-    // Only approval makes a patent corpus-visible, so only approval emits.
-    expect(await prisma.outboxEvent.count()).toBe(0);
+    // Only approval makes a patent corpus-visible, so only approval emits on
+    // the domain contract. Submission does emit to the AI service, which is a
+    // separate contract with different reasoning - see the AI describe block.
+    expect(await domainEvents()).toHaveLength(0);
   });
 
   it('carries the full document in the payload so a consumer needs no callback', async () => {
@@ -65,7 +79,7 @@ describe('outbox writes', () => {
       inventors: [{ inventorId: String(inventor.id), order: 1 }],
     });
 
-    const [event] = await prisma.outboxEvent.findMany();
+    const [event] = await domainEvents();
     const payload = event.payload;
 
     expect(payload.patent_id).toBe(patent.id);
@@ -93,7 +107,7 @@ describe('outbox writes', () => {
       .set(authHeader(adminToken))
       .send({ comments: 'Withdrawn after a third-party objection' });
 
-    const events = await prisma.outboxEvent.findMany({ orderBy: { id: 'asc' } });
+    const events = await domainEvents();
 
     expect(events.map((e) => e.eventType)).toEqual([
       'PatentVersionUpserted',
@@ -112,7 +126,7 @@ describe('outbox writes', () => {
       .set(authHeader(adminToken))
       .send({ comments: 'Insufficient detail in the specification' });
 
-    expect(await prisma.outboxEvent.count()).toBe(0);
+    expect(await domainEvents()).toHaveLength(0);
   });
 
   /**
@@ -141,21 +155,23 @@ describe('outbox writes', () => {
     const patent = await prisma.patent.findUnique({ where: { id: BigInt(draft.id) } });
     expect(patent.status).toBe('pending_admin');
     expect(await prisma.patentReview.count()).toBe(0);
-    expect(await prisma.outboxEvent.count()).toBe(0);
+    // The submit event survives - it committed in an earlier transaction. What
+    // must not survive is anything from the approval that just rolled back.
+    expect(await domainEvents()).toHaveLength(0);
+    expect((await aiOutboxEvents()).map((e) => e.eventType)).toEqual(['PatentSubmitted']);
   });
 });
 
 describe('outbox relay', () => {
   it('publishes pending events and marks them published', async () => {
-    const { token, adminToken } = await setup();
-    const patent = await approvedPatent(token, adminToken);
+    await seedOutboxEvent({ patentId: 7n });
 
     const result = await publishBatch();
 
     expect(result).toEqual({ claimed: 1, published: 1 });
     expect(fakeProducer.messages).toHaveLength(1);
     expect(fakeProducer.messages[0].topic).toBe('patents.events');
-    expect(fakeProducer.messages[0].value.patent_id).toBe(patent.id);
+    expect(fakeProducer.messages[0].value.patent_id).toBe('7');
     expect(fakeProducer.messages[0].headers['event-type']).toBe('PatentVersionUpserted');
 
     const [event] = await prisma.outboxEvent.findMany();
@@ -163,16 +179,32 @@ describe('outbox relay', () => {
   });
 
   /**
+   * A row carries its own destination so the relay can feed two contracts. A
+   * null topic must keep meaning "the default", because that is what every row
+   * written before the AI integration meant.
+   */
+  it('routes a row to its own topic and falls back to the default', async () => {
+    await seedOutboxEvent({ patentId: 7n, eventType: 'PatentSubmitted', topic: 'Patents.submitted' });
+    await seedOutboxEvent({ patentId: 8n });
+
+    await publishBatch();
+
+    expect(fakeProducer.messages.map((m) => m.topic)).toEqual([
+      'Patents.submitted',
+      'patents.events',
+    ]);
+  });
+
+  /**
    * Kafka only orders within a partition, so every version of one patent has
    * to land on the same one. Keying by patent id is what guarantees that.
    */
   it('keys messages by patent id so versions stay ordered', async () => {
-    const { token, adminToken } = await setup();
-    const patent = await approvedPatent(token, adminToken);
+    await seedOutboxEvent({ patentId: 42n });
 
     await publishBatch();
 
-    expect(fakeProducer.messages[0].key).toBe(patent.id);
+    expect(fakeProducer.messages[0].key).toBe('42');
   });
 
   it('publishes nothing when the outbox is empty', async () => {
@@ -185,8 +217,7 @@ describe('outbox relay', () => {
   });
 
   it('is idempotent across passes: a published event is never re-sent', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     await publishBatch();
     await publishBatch();
@@ -195,8 +226,7 @@ describe('outbox relay', () => {
   });
 
   it('leaves a row unpublished and records the failure when the broker rejects it', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     fakeProducer.failNext = 1;
 
@@ -214,8 +244,7 @@ describe('outbox relay', () => {
   });
 
   it('retries a previously failed event on the next pass', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     fakeProducer.failNext = 1;
     await publishBatch();
@@ -231,9 +260,8 @@ describe('outbox relay', () => {
    * throughput at this scale.
    */
   it('stops the batch at the first failure rather than skipping ahead', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
-    await approvedPatent(token, adminToken, { publicationNumber: 'US2222222' });
+    await seedOutboxEvent({ patentId: 1n });
+    await seedOutboxEvent({ patentId: 2n });
 
     expect(await prisma.outboxEvent.count()).toBe(2);
 
@@ -246,20 +274,18 @@ describe('outbox relay', () => {
   });
 
   it('publishes events in id order', async () => {
-    const { token, adminToken } = await setup();
-    const first = await approvedPatent(token, adminToken);
-    const second = await approvedPatent(token, adminToken, { publicationNumber: 'US3333333' });
+    await seedOutboxEvent({ patentId: 11n });
+    await seedOutboxEvent({ patentId: 22n });
 
     await publishBatch();
 
-    expect(fakeProducer.messages.map((m) => m.key)).toEqual([first.id, second.id]);
+    expect(fakeProducer.messages.map((m) => m.key)).toEqual(['11', '22']);
   });
 });
 
 describe('outbox stats', () => {
   it('reports the pending backlog', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     expect(await outboxService.stats()).toEqual({ pending: 1, retrying: 0, deadLettered: 0 });
 
@@ -282,10 +308,9 @@ describe('outbox relay: failure modes', () => {
    * event is what exercises that; failing the first never did.
    */
   it('keeps earlier successes when a later event in the batch fails', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
-    await approvedPatent(token, adminToken, { publicationNumber: 'US4444444' });
-    await approvedPatent(token, adminToken, { publicationNumber: 'US5555555' });
+    await seedOutboxEvent({ patentId: 1n });
+    await seedOutboxEvent({ patentId: 2n });
+    await seedOutboxEvent({ patentId: 3n });
 
     // Let the first through, fail the second.
     const realSend = fakeProducer.send.bind(fakeProducer);
@@ -324,9 +349,8 @@ describe('outbox relay: failure modes', () => {
    * the row is dead-lettered so the queue drains past it.
    */
   it('dead-letters an event that keeps failing, so the queue can drain', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
-    await approvedPatent(token, adminToken, { publicationNumber: 'US6666666' });
+    await seedOutboxEvent({ patentId: 1n });
+    await seedOutboxEvent({ patentId: 2n });
 
     const [poison] = await prisma.outboxEvent.findMany({ orderBy: { id: 'asc' } });
     await prisma.outboxEvent.update({
@@ -351,8 +375,7 @@ describe('outbox relay: failure modes', () => {
    * reason instead of hitting the broker.
    */
   it('rejects an oversized payload without calling the broker', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     const [event] = await prisma.outboxEvent.findMany();
     await prisma.outboxEvent.update({

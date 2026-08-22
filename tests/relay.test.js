@@ -1,4 +1,4 @@
-const { prisma, createUser, createAdmin, login, approvedPatent } = require('./helpers');
+const { prisma, seedOutboxEvent } = require('./helpers');
 const { fakeProducer } = require('./fakes');
 const { start } = require('../src/workers/outboxRelay');
 
@@ -10,16 +10,6 @@ const { start } = require('../src/workers/outboxRelay');
  * before. Two of the worst bugs found in review (a hot spin at 100% CPU, and
  * duplicate publishing) lived in the loop's scheduling, not in the batch.
  */
-
-const setup = async () => {
-  await createUser({ email: 'inventor@example.com' });
-  await createAdmin();
-
-  return {
-    token: (await login('inventor@example.com')).accessToken,
-    adminToken: (await login('admin@example.com')).accessToken,
-  };
-};
 
 /** Polls a condition instead of sleeping a fixed time, so the test is not racy. */
 const waitFor = async (condition, { timeoutMs = 8000, intervalMs = 25 } = {}) => {
@@ -46,15 +36,13 @@ const withRelay = async (body) => {
 
 describe('outbox relay loop', () => {
   it('picks up an event written while it is running, without being prompted', async () => {
-    const { token, adminToken } = await setup();
-
     await withRelay(async () => {
-      const patent = await approvedPatent(token, adminToken);
+      await seedOutboxEvent({ patentId: 7n });
 
       const delivered = await waitFor(() => fakeProducer.messages.length === 1);
 
       expect(delivered).toBe(true);
-      expect(fakeProducer.messages[0].value.patent_id).toBe(patent.id);
+      expect(fakeProducer.messages[0].value.patent_id).toBe('7');
     });
 
     const [event] = await prisma.outboxEvent.findMany();
@@ -62,10 +50,9 @@ describe('outbox relay loop', () => {
   });
 
   it('drains a backlog that existed before it started', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
-    await approvedPatent(token, adminToken, { publicationNumber: 'US1111111' });
-    await approvedPatent(token, adminToken, { publicationNumber: 'US2222222' });
+    await seedOutboxEvent({ patentId: 1n });
+    await seedOutboxEvent({ patentId: 2n });
+    await seedOutboxEvent({ patentId: 3n });
 
     await withRelay(() => waitFor(() => fakeProducer.messages.length === 3));
 
@@ -81,8 +68,7 @@ describe('outbox relay loop', () => {
    * poll interval rather than burning attempts as fast as it can.
    */
   it('backs off instead of spinning when the head event keeps failing', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     fakeProducer.failNext = Number.MAX_SAFE_INTEGER;
 
@@ -103,17 +89,15 @@ describe('outbox relay loop', () => {
   });
 
   it('stops cleanly and publishes nothing more afterwards', async () => {
-    const { token, adminToken } = await setup();
-
     const { stop } = await start();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent({ patentId: 1n });
     await waitFor(() => fakeProducer.messages.length === 1);
     await stop();
 
     const countAtStop = fakeProducer.messages.length;
 
     // An event written after stop() must sit untouched.
-    await approvedPatent(token, adminToken, { publicationNumber: 'US3333333' });
+    await seedOutboxEvent({ patentId: 2n });
     await new Promise((resolve) => setTimeout(resolve, 1200));
 
     expect(fakeProducer.messages).toHaveLength(countAtStop);
@@ -125,8 +109,7 @@ describe('outbox relay loop', () => {
    * transient database or broker problem and carry on once it clears.
    */
   it('recovers after a transient publish failure', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     fakeProducer.failNext = 1;
 
@@ -139,8 +122,7 @@ describe('outbox relay loop', () => {
   });
 
   it('does not re-publish events it already delivered', async () => {
-    const { token, adminToken } = await setup();
-    await approvedPatent(token, adminToken);
+    await seedOutboxEvent();
 
     await withRelay(async () => {
       await waitFor(() => fakeProducer.messages.length === 1);

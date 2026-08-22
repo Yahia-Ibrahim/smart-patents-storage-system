@@ -21,10 +21,14 @@ const config = require('../config/env');
  * guarantee rests on this write sharing a transaction with the state change it
  * describes. Passing the plain client here is legal JavaScript and a silent
  * correctness bug, so callers should always be inside a `$transaction`.
+ *
+ * `topic` is optional; omitting it routes the event to the default patent
+ * events topic, which is what every caller meant before the outbox began
+ * feeding a second contract.
  */
-const enqueue = (tx, { aggregateType, aggregateId, eventType, payload }) =>
+const enqueue = (tx, { aggregateType, aggregateId, eventType, payload, topic = null }) =>
   tx.outboxEvent.create({
-    data: { aggregateType, aggregateId, eventType, payload },
+    data: { aggregateType, aggregateId, eventType, payload, topic },
   });
 
 /**
@@ -70,7 +74,7 @@ const claimBatch = async (batchSize) => {
         LIMIT ${Number(batchSize)}
         FOR UPDATE SKIP LOCKED
      )
-    RETURNING id, aggregate_type, aggregate_id, event_type, payload, attempts`;
+    RETURNING id, aggregate_type, aggregate_id, event_type, payload, topic, attempts`;
 };
 
 const markPublished = (id) =>

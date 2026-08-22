@@ -6,6 +6,7 @@ const {
   patentVersionUpserted,
   patentVersionWithdrawn,
 } = require('../events/patentEvents');
+const aiEvents = require('../events/aiEvents');
 
 const access = require('./patents/access');
 const documents = require('./patents/documents');
@@ -182,6 +183,28 @@ const updatePatent = async (id, updates, user) => {
   return updated;
 };
 
+/**
+ * Appends an AI-contract event to the outbox.
+ *
+ * Same outbox, same transaction as the state change — the "never publish from a
+ * request handler" rule is not relaxed for the AI service. It differs from the
+ * domain events only in destination topic and payload shape.
+ */
+const enqueueAiEvent = (tx, id, eventType, payload) =>
+  outboxService.enqueue(tx, {
+    aggregateType: AGGREGATE_TYPE,
+    aggregateId: id,
+    eventType,
+    payload,
+    topic: aiEvents.topicFor(eventType),
+  });
+
+/** Which AI event an admin decision produces. */
+const AI_EVENT_FOR_ACTION = Object.freeze({
+  approve: aiEvents.EVENT_TYPES.APPROVED,
+  decline: aiEvents.EVENT_TYPES.REJECTED,
+});
+
 const submitForReview = async (id, user) => {
   const patent = await access.findOwnedPatent(id, user);
 
@@ -191,9 +214,28 @@ const submitForReview = async (id, user) => {
     throw conflict('A patent cannot be submitted without an uploaded document');
   }
 
-  return prisma.$transaction((tx) =>
-    applyTransition(tx, id, 'submit', { submittedAt: new Date() }, PATENT_INCLUDE),
-  );
+  return prisma.$transaction(async (tx) => {
+    const updated = await applyTransition(
+      tx,
+      id,
+      'submit',
+      { submittedAt: new Date() },
+      PATENT_INCLUDE,
+    );
+
+    // Submission emits to the AI service only. `patentEvents` deliberately
+    // stays silent here: nothing joins the search corpus until an admin
+    // approves, and that reasoning is unchanged. The AI service merely caches
+    // an embedding and reports similarity for the reviewer.
+    await enqueueAiEvent(
+      tx,
+      id,
+      aiEvents.EVENT_TYPES.SUBMITTED,
+      aiEvents.patentSubmitted(updated),
+    );
+
+    return updated;
+  });
 };
 
 /**
@@ -240,6 +282,21 @@ const review = async (id, action, { decision, comments }, admin, buildEvent) => 
         eventType: event.event_type,
         payload: event,
       });
+    }
+
+    // The AI event fires on every decision, where the domain event fires only
+    // when corpus membership changes. A patent declined without ever being
+    // approved never entered the corpus — so no withdrawal — but the AI service
+    // still cached an embedding for it at submission time and needs to drop it.
+    const aiEventType = AI_EVENT_FOR_ACTION[action];
+
+    if (aiEventType) {
+      const build =
+        aiEventType === aiEvents.EVENT_TYPES.APPROVED
+          ? aiEvents.patentApproved
+          : aiEvents.patentRejected;
+
+      await enqueueAiEvent(tx, id, aiEventType, build(updated));
     }
 
     return updated;

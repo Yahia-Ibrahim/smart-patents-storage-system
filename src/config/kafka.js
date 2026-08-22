@@ -12,14 +12,18 @@ const config = require('./env');
 
 let producer = null;
 let connected = false;
+let consumer = null;
 
-const buildProducer = () => {
-  const kafka = new Kafka({
+const buildKafka = () =>
+  new Kafka({
     clientId: config.kafka.clientId,
     brokers: config.kafka.brokers,
     logLevel: config.isTest ? logLevel.NOTHING : logLevel.WARN,
     retry: { initialRetryTime: 300 },
   });
+
+const buildProducer = () => {
+  const kafka = buildKafka();
 
   return kafka.producer({
     allowAutoTopicCreation: true,
@@ -67,4 +71,31 @@ const disconnectProducer = async () => {
   connected = false;
 };
 
-module.exports = { getProducer, setProducer, connectProducer, disconnectProducer };
+/**
+ * The consumer for the AI service's similarity reports.
+ *
+ * Behind a setter for the same reason as the producer: the suite substitutes a
+ * fake so no test needs a live broker. Only the report consumer process
+ * (`npm run consumer`) ever calls this — the API never consumes, exactly as it
+ * never produces.
+ */
+const getConsumer = () => {
+  if (!consumer) {
+    consumer = buildKafka().consumer({ groupId: config.kafka.aiReportGroupId });
+  }
+
+  return consumer;
+};
+
+const setConsumer = (replacement) => {
+  consumer = replacement;
+};
+
+module.exports = {
+  getProducer,
+  setProducer,
+  connectProducer,
+  disconnectProducer,
+  getConsumer,
+  setConsumer,
+};

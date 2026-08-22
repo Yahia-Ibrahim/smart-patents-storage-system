@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const request = require('supertest');
 const app = require('../src/app');
 const prisma = require('../src/config/prisma');
@@ -117,10 +118,39 @@ const createInventor = (overrides = {}) =>
     },
   });
 
+/**
+ * Writes an outbox row directly.
+ *
+ * Relay mechanics — claiming, ordering, retries, head-of-line blocking,
+ * dead-lettering — have nothing to do with which business action produced a
+ * row. Driving those tests through the API coupled them to how many events a
+ * submit or an approval happens to emit, so adding the AI contract broke a
+ * dozen tests that were not about the AI contract at all. Seeding states the
+ * fixture the test actually needs.
+ */
+const seedOutboxEvent = ({ patentId = 1n, eventType = 'PatentVersionUpserted', payload, topic = null } = {}) =>
+  prisma.outboxEvent.create({
+    data: {
+      aggregateType: 'patent',
+      aggregateId: BigInt(patentId),
+      eventType,
+      topic,
+      payload: payload ?? {
+        event_type: eventType,
+        event_id: randomUUID(),
+        patent_id: String(patentId),
+        version: 1,
+        title: 'A seeded event',
+        occurred_at: new Date().toISOString(),
+      },
+    },
+  });
+
 module.exports = {
   api,
   app,
   prisma,
+  seedOutboxEvent,
   createUser,
   createAdmin,
   login,
