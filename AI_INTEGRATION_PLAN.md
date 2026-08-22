@@ -124,20 +124,80 @@ Qdrant. Then the failure cases: AI down, Qdrant down, malformed event.
 
 ---
 
-## 5. Known weaknesses — deliberately NOT fixed here
+## 5. What was verified, and how
 
-Found while reading; none blocks E2E. Recorded for the owning engineer.
+All against a running stack — real HTTP, a real PDF in MinIO, real Kafka — not unit tests.
+Driver scripts are in the scratchpad (`e2e.js`, `resilience.js`); the flow they exercise is:
+
+| # | Check | Result |
+|---|---|---|
+| 1 | submit → `Patents.submitted` → AI → report → `GET /patents/:id/reviews` | works |
+| 2 | Similarity is semantically real | new cooling patent scored **0.7630** against the self-chilling can and **0.0808** against the wind turbine |
+| 3 | AI does not gate the lifecycle | submit returns `pending_admin`, unchanged |
+| 4 | approve → vector enters Qdrant | points 2 → 3 |
+| 5 | decline → vector leaves Qdrant | required a fix; see below |
+| 6 | Both contracts emitted, routed by topic | `PatentSubmitted`→`Patents.submitted`, `PatentVersionUpserted`→default, … |
+| 7 | **AI service down** | API accepted a submission in **176 ms**; report arrived automatically on restart |
+| 8 | **Kafka down** | API accepted a submission in **101 ms**, `/ready` stayed `ready`, event held in the outbox, drained on broker recovery, report followed |
+| 9 | Malformed reports (bad JSON, unknown patent, missing id) | all three discarded with distinct reasons; consumer stayed up |
+| 10 | Whole stack in Docker | full loop re-run inside the network — 10/10 services healthy |
+| 11 | Backend suite | 389 tests, 19 suites, green |
+
+Two things were **wrong and got fixed** because running the system exposed them:
+
+- **The report consumer crashed on every cold start.** The report topic does not exist until
+  the AI service first publishes, and a KafkaJS consumer subscribing to an unknown topic fails
+  its metadata refresh rather than waiting. It now ensures the topic before subscribing.
+- **Declining left the patent in the similarity corpus forever.** Predicted from reading, then
+  confirmed live: after declining, the embedding cache row was gone but the Qdrant point
+  remained, so a declined patent kept being offered as prior art. Fixed in the AI service (see
+  §6).
+
+One thing is **wrong and was left alone** because it is pre-existing and unrelated:
+
+- **Presigned URLs are unusable outside the Docker network.** Compose sets
+  `S3_ENDPOINT: http://minio:9000` for the backend, so the URLs it signs name a host only
+  resolvable inside the network. A browser — or anything on the host — cannot upload against
+  them. Signing needs a *public* endpoint while the backend's own `headObject`/`deleteObject`
+  calls need the *internal* one, so the real fix is two endpoints in `storageService`. Nothing
+  to do with the AI service, which fetches over the internal network and is unaffected. The
+  host-side E2E worked because a host-run backend signs with `127.0.0.1:9000`.
+
+## 6. Changes made to the AI service
+
+Deliberately tiny — 42 added lines in one file, nothing removed, no existing behaviour altered.
+
+| Change | Why it was necessary |
+|---|---|
+| `_download_document` handles `s3://` | Required for integration. Documents live in a private bucket; the previous `urlretrieve` path is untouched, so their arXiv test scripts still work exactly as before. |
+| `handle_rejected_patent` also clears Qdrant | Genuine correctness bug, confirmed live. Their code already intended cleanup on rejection — it cleared the cache — and simply missed the vector store. Kept as a separately guarded block so a cache failure cannot skip the externally visible half. |
+| `requirements.txt` → UTF-8, `+ minio` | The client is needed for the above. Re-encoding was forced: appending a UTF-8 line to a UTF-16 file corrupts it. Note the encoding was **not** broken — pip honours the BOM. |
+| `.env.example` added | It had none, and its own compose declares `env_file: .env`, so standalone `docker compose up` failed outright. |
+
+Everything else found while reading was left alone and recorded below.
+
+## 7. Known weaknesses — deliberately NOT fixed
+
+Found while reading, and left alone. Recorded for the owning engineer.
 
 | Area | Issue |
 |---|---|
-| AI tests | `tests/test_indexing_service.py` and `test_kafka_consumer.py` call `index_patent` / `approve_patent` / `reject_patent`, which **do not exist** (the methods are `handle_*_patent`). These tests fail against the code as written. Pre-existing, unrelated to integration. |
-| AI reject | `handle_rejected_patent` deletes the cached embedding but **never removes the Qdrant vector**, so a declined patent stays in the similarity corpus forever. Genuine correctness bug that our decline flow now exercises. Flagged below. |
+| AI tests | `tests/test_indexing_service.py` and `test_kafka_consumer.py` call `index_patent` / `approve_patent` / `reject_patent`, which **do not exist** on `IndexingService` (the methods are `handle_*_patent`). `test_kafka_consumer` also asserts the handler receives a raw dict where the code passes a validated DTO. Pre-existing and unrelated to integration, but it means their suite does not currently protect the code it covers. |
 | AI startup | `VectorStoreService.__init__` calls Qdrant during `build_indexing_service()`, so the process crashes at boot if Qdrant is briefly unavailable. No retry/backoff. |
 | AI errors | `consume_messages` catches every exception and `continue`s with auto-commit on — a failed message is silently dropped, never retried, no DLQ. |
 | AI config | `settings.py` is empty; config is scattered `os.getenv` calls with inline defaults. `AdminRecord` table is defined and never used. |
 | AI embedding | Text is embedded whole, with no chunking; MiniLM truncates at 256 tokens, so only the first page or so of a long patent influences the vector. |
 
-**One flagged exception:** the Qdrant-delete-on-reject bug sits directly in the flow
-this integration wires up. It is a ~3-line addition. I plan to make that minimal fix
-and document it; say the word if you would rather leave it entirely to the owning
-engineer.
+The one weakness that was **not** left alone is the Qdrant-delete-on-reject bug — it sat
+directly in the flow this integration wires up and produced visibly wrong output, so it was
+fixed. See §6.
+
+### Found during verification (infrastructure, ours not theirs)
+
+| Area | Issue |
+|---|---|
+| Presigned URL endpoint | See §5 — compose-signed URLs are unreachable from outside the Docker network. Pre-existing; needs split public/internal endpoints in `storageService`. |
+| AI image size | 8.7 GB, because `torch==2.13.0` resolves to the CUDA build. A CPU-only index would cut it by roughly 7 GB, but the pin is the other team's. |
+| Stale `node_modules` volume | The Node services mount an anonymous volume over `node_modules`, which survives `docker compose up` and silently masks dependency changes. Needs `--renew-anon-volumes` after any dependency change. |
+| Qdrant upgrades | v1.18 cannot read storage written by v1.12; changing the pin requires wiping `data/qdrant`. Fine while the corpus is rebuildable from Postgres, not once it is not. |
+| Report topic partitioning | The AI publishes reports with **no message key**, so they round-robin across partitions. On the single-partition default this is fine; on a multi-partition topic two reports for one patent could be handled concurrently and the last write would win arbitrarily. Fixing it properly means keying the produce call in their service. |
