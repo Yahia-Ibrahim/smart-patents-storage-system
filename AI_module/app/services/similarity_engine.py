@@ -4,7 +4,7 @@ Patent similarity search service.
 
 from __future__ import annotations
 
-from app.exceptions import SimilaritySearchException
+from app.exceptions.exceptions import SimilaritySearchException
 from app.models.dto import SearchResultDTO
 
 
@@ -36,6 +36,7 @@ class SimilarityEngine:
                     patent_id=result.id,
                     title=result.payload["title"],
                     score=result.score,
+                    abstract=result.payload.get("abstract", "") or "",
                 )
                 for result in results
             ]

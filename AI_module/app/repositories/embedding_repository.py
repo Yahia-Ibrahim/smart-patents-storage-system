@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.database.models import EmbeddingRecord
-from app.exceptions import EmbeddingRepositoryException
+from app.exceptions.exceptions import EmbeddingRepositoryException
 from app.models.dto import EmbeddingDTO
 
 

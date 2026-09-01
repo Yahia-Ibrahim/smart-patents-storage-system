@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 from urllib.request import urlretrieve
 
-from app.exceptions import VectorStoreException
+from app.exceptions.exceptions import VectorStoreException
 from app.models.dto import (
     EmbeddingDTO,
     PatentApprovedEventDTO,
@@ -105,6 +105,7 @@ class IndexingService:
             patent_title=payload.title,
             # application_number=payload.applicationNumber,
             submitted_at=payload.submittedAt,
+            abstract=payload.abstract or "",
         )
         self.vector_store_service.insert_embedding(embedding, qdrant_payload)
 

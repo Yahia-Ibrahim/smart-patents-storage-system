@@ -13,6 +13,8 @@ class PatentEventDTO(BaseModel):
     submittedBy: int
     submittedAt: str
 
+    abstract: Optional[str] = None
+
 class PatentSubmittedEventDTO(PatentEventDTO):
     pass
 
@@ -37,11 +39,15 @@ class QdrantPayloadDTO(BaseModel):
     patent_title: str
     submitted_at: str
 
+    abstract: str = ""
+
 
 class SearchResultDTO(BaseModel):
     patent_id: int
     title: str
     score: float
+    
+    abstract: str = ""
 
 
 class SimilarityReportDTO(BaseModel):

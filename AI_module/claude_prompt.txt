@@ -1,0 +1,1855 @@
+You are helping me work on a Python project called Smart Patents Storage System.
+
+Very brief project introduction:
+This AI module is a smart storage and retrieval system for patents. It consumes patent lifecycle events through Kafka, extracts text from patent documents, generates embeddings, stores embeddings in PostgreSQL and Qdrant, performs similarity searches, and publishes similarity reports.
+
+MY REQUEST:
+[Write my actual request here. Preserve the project context below when answering.]
+
+CONTEXT AND EXPECTATIONS:
+- The project is located in the AI_module directory.
+- It uses Python 3.12, FastAPI, Pydantic, SQLAlchemy/PostgreSQL, Qdrant, Kafka, PyMuPDF, and Sentence Transformers.
+- The application is currently a work in progress. Some files are empty. The repository no longer contains test source files; any test sections below are historical context from the earlier snapshot and should not be treated as current project files. Treat the remaining source below as the authoritative current snapshot and call out inconsistencies when they affect the requested work.
+- Do not assume that infrastructure services are running unless I explicitly say so.
+- Prefer focused, minimal changes that match the existing architecture.
+- When proposing or implementing a change, explain relevant assumptions and provide appropriate tests or validation steps.
+- Do not expose or reproduce secrets from environment files. The .env file exists locally but is intentionally omitted from this prompt.
+
+PROJECT TREE:
+
+AI_module/
+|-- .dockerignore
+|-- .env (omitted: local environment values and possible secrets)
+|-- .gitignore
+|-- docker-compose.yml
+|-- dockerfile
+|-- requirements.txt
+|-- app/
+|   |-- main.py
+|   |-- ai/
+|   |   |-- agent/ (currently no source files found)
+|   |   |-- chains/ (currently no source files found)
+|   |   |-- models/ (currently no source files found)
+|   |   |-- prompts/ (currently no source files found)
+|   |-- api/
+|   |   |-- app.py
+|   |   |-- router.py
+|   |   |-- routes/
+|   |       |-- patent_search.py
+|   |-- config/
+|   |   |-- settings.py
+|   |-- consumers/
+|   |   |-- kafka_consumer.py
+|   |-- database/
+|   |   |-- database.py
+|   |   |-- models.py
+|   |-- exceptions/
+|   |   |-- exceptions.py
+|   |-- models/
+|   |   |-- dto.py
+|   |-- producers/
+|   |   |-- notification_producer.py
+|   |-- repositories/
+|   |   |-- embedding_repository.py
+|   |-- schemas/
+|   |   |-- patent_search.py
+|   |-- services/
+|       |-- document_extractor.py
+|       |-- embedding_service.py
+|       |-- indexing_service.py
+|       |-- report_generator.py
+|       |-- similarity_engine.py
+|       |-- vector_store_service.py
+|-- scripts/
+|   |-- kafka/
+|       |-- consume_reports.py
+|       |-- produce_approval.py
+|       |-- produce_submission.py
+|-- tests/ (currently empty; test files removed)
+
+SOURCE FILES:
+
+===== app/api/app.py =====
+```python
+from fastapi import FastAPI
+
+from app.api.routes.patent_search import router as patent_search_router
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="Smart Patents Storage AI Service",
+        version="1.0.0",
+        description="AI-powered patent search and similarity analysis service.",
+    )
+
+    app.include_router(patent_search_router)
+
+    return app
+
+
+app = create_app()
+```
+
+===== app/api/router.py =====
+```python
+```
+
+===== app/api/routes/patent_search.py =====
+```python
+from fastapi import APIRouter
+
+from app.schemas.patent_search import (
+    PatentSearchRequest,
+    PatentSearchResponse,
+)
+
+router = APIRouter(
+    prefix="/api/v1/patents",
+    tags=["Patent Search"],
+)
+
+
+@router.post(
+    "/search",
+    response_model=PatentSearchResponse,
+)
+def search_patents(
+    request: PatentSearchRequest,
+) -> PatentSearchResponse:
+
+    return PatentSearchResponse(
+        results=[]
+    )
+```
+
+===== app/config/settings.py =====
+```python
+```
+
+===== app/consumers/kafka_consumer.py =====
+```python
+"""Kafka consumer entry points for patent lifecycle events."""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Dict, Optional
+
+from confluent_kafka import Consumer
+
+from app.models.dto import PatentApprovedEventDTO, PatentRejectedEventDTO, PatentSubmittedEventDTO
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+class KafkaPatentConsumer:
+    """Subscribe to patent lifecycle topics and forward messages to the indexing service."""
+
+    TOPIC_HANDLERS = {
+        "Patents.submitted": "handle_patent_submitted",
+        "Patents.approved": "handle_patent_approved",
+        "Patents.rejected": "handle_patent_rejected",
+    }
+
+    def __init__(self, indexing_service: Optional[Any] = None, consumer: Optional[Any] = None):
+        self.indexing_service = indexing_service
+        self.consumer = consumer
+
+    def _build_consumer(self) -> Consumer:
+        """Create a Kafka consumer configured for the patent topics."""
+        config = {
+            "bootstrap.servers": os.getenv(
+                "KAFKA_BOOTSTRAP_SERVERS",
+                "localhost:9092",
+            ),
+            "group.id": "ai-service-patents",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": True,
+        }
+        return Consumer(config)
+
+    def start(self, topics: Optional[list[str]] = None) -> None:
+        """Subscribe to the configured topics and prepare the consumer."""
+        if self.consumer is None:
+            self.consumer = self._build_consumer()
+
+        subscribed_topics = list(topics or self.TOPIC_HANDLERS.keys())
+        self.consumer.subscribe(subscribed_topics)
+
+    def process_message(self, topic: str, payload: Dict[str, Any]) -> Any:
+        """Dispatch a Kafka payload to the appropriate handler."""
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be a dictionary")
+
+        handler_name = self.TOPIC_HANDLERS.get(topic)
+        if handler_name is None:
+            raise ValueError(f"Unsupported topic: {topic}")
+
+        dto_map = {
+            "Patents.submitted": PatentSubmittedEventDTO,
+            "Patents.approved": PatentApprovedEventDTO,
+            "Patents.rejected": PatentRejectedEventDTO,
+        }
+        dto_cls = dto_map.get(topic)
+        parsed_payload = dto_cls.model_validate(payload) if dto_cls is not None else payload
+
+        handler = getattr(self, handler_name)
+        return handler(parsed_payload)
+
+    def consume_messages(self, timeout: float = 1.0, max_messages: Optional[int] = None) -> list[Any]:
+        """Poll Kafka for messages and forward each one to the indexing service."""
+        # if self.consumer is None:
+        #     self.start()
+        # else:
+        self.start()
+
+        results = []
+        count = 0
+        while max_messages is None or count < max_messages:
+            msg = self.consumer.poll(timeout=timeout)
+            if msg is None:
+                continue                
+            if msg.error():
+                continue
+
+            body = msg.value()
+            topic = msg.topic()
+            
+            if isinstance(body, (bytes, bytearray)):
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except json.JSONDecodeError:
+                    payload = {"raw": body.decode("utf-8")}
+            else:
+                payload = body
+
+            if not isinstance(payload, dict):
+                payload = {"raw": payload}
+
+            # print(f"[INFO] Received Kafka message from {topic}: {payload}")
+            logger.info("Received Kafka message from %s: %s", topic, payload)
+
+            try:
+                processed = self.process_message(topic, payload)
+
+            except Exception:
+                logger.exception(
+                    "Failed processing message from topic %s",
+                    topic
+                )
+                continue
+            results.append(processed)
+            count += 1
+
+        return results
+
+    def handle_patent_submitted(self, payload: PatentSubmittedEventDTO) -> Any:
+        """Handle a submitted-patent event."""
+        if self.indexing_service is None:
+            return None
+        return self.indexing_service.handle_submitted_patent(payload)
+
+    def handle_patent_approved(self, payload: PatentApprovedEventDTO) -> Any:
+        """Handle an approved-patent event."""
+        if self.indexing_service is None:
+            return None
+        return self.indexing_service.handle_approved_patent(payload)
+
+    def handle_patent_rejected(self, payload: PatentRejectedEventDTO) -> Any:
+        """Handle a rejected-patent event."""
+        if self.indexing_service is None:
+            return None
+        return self.indexing_service.handle_rejected_patent(payload)
+```
+
+===== app/database/database.py =====
+```python
+from __future__ import annotations
+
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.database.models import Base, EmbeddingRecord, AdminRecord
+
+DATABASE_URL = os.getenv("DATABASE_URL") or (
+    f"postgresql+psycopg2://{os.getenv('DB_USER', 'ai')}:{os.getenv('DB_PASSWORD', 'ai')}@"
+    f"{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME', 'ai_db')}"
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def get_db_session():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def init_db():
+    """Initialize the database and create tables if they don't exist.
+    """
+    Base.metadata.create_all(bind=engine)
+```
+
+===== app/database/models.py =====
+```python
+from __future__ import annotations
+
+from sqlalchemy import JSON, Column, Integer, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+
+class EmbeddingRecord(Base):
+    __tablename__ = "embeddings"
+
+    # id = Column(Integer, primary_key=True, index=True)
+    patent_id = Column(Integer, primary_key=True, index=True)
+    embedding = Column(JSON, nullable=False)
+    model_name = Column(String(128), nullable=False, default="default-model")
+    # title = Column(String(512), nullable=True)
+    submitted_at = Column(String(64), nullable=True)
+
+
+class AdminRecord(Base):
+    __tablename__ = "admins"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, unique=True)
+    email = Column(String(255), nullable=False, unique=True)
+```
+
+===== app/exceptions/exceptions.py =====
+```python
+"""Application-specific exceptions."""
+
+
+class DocumentExtractionException(Exception):
+    """Raised when a patent document cannot be processed."""
+
+
+class EmbeddingGenerationException(Exception):
+    """Raised when an embedding cannot be generated."""
+
+
+class EmbeddingRepositoryException(Exception):
+    """Raised when the embedding cache cannot be accessed."""
+
+
+class VectorStoreException(Exception):
+    """Raised when Qdrant operations fail."""
+
+
+class SimilaritySearchException(Exception):
+    """Raised when similarity search fails."""
+
+
+class ReportGenerationException(Exception):
+    """Raised when a similarity report cannot be generated."""
+```
+
+===== app/main.py =====
+```python
+from __future__ import annotations
+
+from app.consumers.kafka_consumer import KafkaPatentConsumer
+
+from app.repositories.embedding_repository import EmbeddingRepository
+
+from app.services.document_extractor import DocumentExtractor
+from app.services.embedding_service import EmbeddingService
+from app.services.indexing_service import IndexingService
+from app.producers.notification_producer import NotificationProducer
+from app.services.report_generator import ReportGenerator
+from app.services.similarity_engine import SimilarityEngine
+from app.services.vector_store_service import VectorStoreService
+from app.database.database import init_db
+
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+
+
+
+def build_indexing_service() -> IndexingService:
+    """
+    Build the dependency graph for the indexing service.
+    """
+
+    vector_store = VectorStoreService()
+
+    return IndexingService(
+        document_extractor=DocumentExtractor(),
+        embedding_service=EmbeddingService(),
+        vector_store_service=vector_store,
+        embedding_repository=EmbeddingRepository(),
+        similarity_engine=SimilarityEngine(vector_store),
+        report_generator=ReportGenerator(),
+        notification_producer=NotificationProducer(),
+    )
+
+
+def main() -> None:
+
+    init_db()
+
+    indexing_service = build_indexing_service()
+
+    consumer = KafkaPatentConsumer(
+        indexing_service=indexing_service,
+    )
+
+    consumer.start()
+
+    consumer.consume_messages()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+===== app/models/dto.py =====
+```python
+from __future__ import annotations
+
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+class PatentEventDTO(BaseModel):
+    eventId: str
+    patentId: int
+    title: str
+    applicationNumber: str
+    fileUrl: str
+    submittedBy: int
+    submittedAt: str
+
+class PatentSubmittedEventDTO(PatentEventDTO):
+    pass
+
+
+class PatentApprovedEventDTO(PatentEventDTO):
+    pass
+
+
+class PatentRejectedEventDTO(PatentEventDTO):
+    pass
+
+
+class EmbeddingDTO(BaseModel):
+    patent_id: int
+    embedding: list[float]
+    model_name: str
+
+
+class QdrantPayloadDTO(BaseModel):
+    patent_id: int
+    model_name: str
+    patent_title: str
+    submitted_at: str
+
+
+class SearchResultDTO(BaseModel):
+    patent_id: int
+    title: str
+    score: float
+
+
+class SimilarityReportDTO(BaseModel):
+    patent_id: int
+    title: str
+    matches: list[SearchResultDTO]
+```
+
+===== app/producers/notification_producer.py =====
+```python
+"""
+Kafka producer for notification events.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+
+from confluent_kafka import Producer
+
+from app.models.dto import SimilarityReportDTO
+
+
+class NotificationProducer:
+    """
+    Publishes notification events to Kafka.
+    """
+
+    REPORT_TOPIC = os.getenv(
+        "REPORT_TOPIC",
+        "Notifications.similarity-report",
+    )
+
+    def __init__(self, producer: Producer | None = None):
+        self.producer = producer or self._build_producer()
+
+    def _build_producer(self) -> Producer:
+        config = {
+            "bootstrap.servers": os.getenv(
+                "KAFKA_BOOTSTRAP_SERVERS",
+                "localhost:9092",
+            )
+        }
+
+        return Producer(config)
+
+    def publish_similarity_report(
+        self,
+        report: SimilarityReportDTO,
+    ) -> None:
+        """
+        Publish a similarity report for the notification service.
+        """
+
+        self.producer.produce(
+            topic=self.REPORT_TOPIC,
+            value=report.model_dump_json(),
+        )
+
+        self.producer.flush()
+```
+
+===== app/repositories/embedding_repository.py =====
+```python
+from __future__ import annotations
+
+import json
+from typing import Optional
+
+from sqlalchemy.orm import Session
+
+from app.database.models import EmbeddingRecord
+from app.exceptions.exceptions import EmbeddingRepositoryException
+from app.models.dto import EmbeddingDTO
+
+
+class EmbeddingRepository:
+    """Repository-backed cache for patent embeddings."""
+
+    def __init__(self, session_factory=None):
+        self.session_factory = session_factory
+
+    def _get_session(self) -> Session:
+        if self.session_factory is None:
+            from app.database.database import SessionLocal
+
+            return SessionLocal()
+        return self.session_factory()
+
+    def store_embedding(self, embedding_dto: EmbeddingDTO) -> None:
+        """Store or update an embedding in the cache."""
+        session = self._get_session()
+        try:
+            record = session.query(EmbeddingRecord).filter_by(patent_id=embedding_dto.patent_id).first()
+            if record is None:
+                record = EmbeddingRecord(
+                    patent_id=embedding_dto.patent_id,
+                    embedding=embedding_dto.embedding,
+                    model_name=embedding_dto.model_name,
+                )
+                session.add(record)
+            else:
+                record.embedding = embedding_dto.embedding
+                record.model_name = embedding_dto.model_name
+            session.commit()
+        except Exception as ex:
+            session.rollback()
+
+            raise EmbeddingRepositoryException(
+                f"Failed to store embedding for patent '{embedding_dto.patent_id}'."
+            ) from ex
+        finally:
+            session.close()
+
+    def get_embedding(self, patent_id: int) -> Optional[EmbeddingDTO]:
+        """Read a cached embedding by patent id and return it as an EmbeddingDTO."""
+        session = self._get_session()
+        try:
+            record = session.query(EmbeddingRecord).filter_by(patent_id=patent_id).first()
+            if record is None:
+                return None
+
+            embedding_list = record.embedding
+
+            # if isinstance(embedding_value, str):
+            #     embedding_value = json.loads(embedding_value)
+            # embedding_list = embedding_value if isinstance(embedding_value, list) else []
+            
+            return EmbeddingDTO(
+                patent_id=record.patent_id,
+                embedding=embedding_list,
+                model_name=record.model_name or "default-model",
+            )
+        except Exception as ex:
+            raise EmbeddingRepositoryException(
+                f"Failed to retrieve embedding for patent '{patent_id}'."
+            ) from ex
+        finally:
+            session.close()
+
+    def delete_embedding(self, patent_id: int) -> bool:
+        """Delete a cached embedding if it exists."""
+        session = self._get_session()
+        try:
+            record = session.query(EmbeddingRecord).filter_by(patent_id=patent_id).first()
+            if record is None:
+                return False
+            session.delete(record)
+            session.commit()
+            return True
+        except Exception as ex:
+            session.rollback()
+            raise EmbeddingRepositoryException(
+                f"Failed deleting embedding for patent '{patent_id}'."
+            ) from ex
+        finally:
+            session.close()
+```
+
+===== app/schemas/patent_search.py =====
+```python
+from pydantic import BaseModel, Field
+
+
+class PatentSearchRequest(BaseModel):
+    text: str = Field(
+        ...,
+        min_length=1,
+        description="Text to search for relevant patents."
+    )
+
+
+class PatentSearchResult(BaseModel):
+    patent_id: int
+    title: str
+    overlap_ratio: float | None = None
+    why_they_overlap: str | None = None
+
+
+class PatentSearchResponse(BaseModel):
+    results: list[PatentSearchResult]
+```
+
+===== app/services/document_extractor.py =====
+```python
+"""
+Service responsible for extracting textual content from patent PDF documents.
+"""
+
+from __future__ import annotations
+
+import fitz
+
+from app.exceptions.exceptions import DocumentExtractionException
+
+
+class DocumentExtractor:
+    """
+    Extract textual content from patent PDF files.
+    """
+
+    def extract_text(self, document_path: str) -> str:
+        """
+        Extract all readable text from a patent PDF.
+
+        Args:
+            document_path: Local path to the downloaded PDF.
+
+        Returns:
+            Extracted document text.
+
+        Raises:
+            DocumentExtractionException:
+                If the document cannot be opened or contains
+                no extractable text.
+        """
+
+        try:
+            document = fitz.open(document_path)
+
+            try:
+                pages = [
+                    self._extract_page_text(page)
+                    for page in document
+                ]
+            finally:
+                document.close()
+
+            text = "\n".join(pages).strip()
+
+            if self._is_empty(text):
+                raise DocumentExtractionException(
+                    "Document contains no extractable text."
+                )
+
+            return text
+
+        except DocumentExtractionException:
+            raise
+
+        except Exception as ex:
+            raise DocumentExtractionException(
+                f"Failed to extract text from '{document_path}'."
+            ) from ex
+
+    def _extract_page_text(self, page: fitz.Page) -> str:
+        """
+        Extract text from a single PDF page.
+        """
+
+        return page.get_text().strip()
+
+    @staticmethod
+    def _is_empty(text: str) -> bool:
+        """
+        Return True if the extracted text contains no useful content.
+        """
+
+        return not text.strip()
+```
+
+===== app/services/embedding_service.py =====
+```python
+# app/services/embedding_service.py
+
+from __future__ import annotations
+
+import os
+
+from sentence_transformers import SentenceTransformer
+
+
+class EmbeddingService:
+    """
+    Generates dense vector embeddings for patent documents.
+    """
+
+    def __init__(self, model_name: str | None = None):
+        self.model_name = (
+            model_name
+            or os.getenv(
+                "EMBEDDING_MODEL_NAME",
+                "sentence-transformers/all-MiniLM-L6-v2",
+            )
+        )
+
+        self.model = SentenceTransformer(self.model_name)
+
+    def generate_embedding(self, text: str) -> list[float]:
+        """
+        Generate an embedding for a document.
+        """
+
+        if not text.strip():
+            raise ValueError("Document text is empty.")
+
+        embedding = self.model.encode(
+            text,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        )
+
+        return embedding.tolist()
+```
+
+===== app/services/indexing_service.py =====
+```python
+"""High-level indexing workflow for patent lifecycle events."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Dict, Optional
+from urllib.parse import urlparse
+from urllib.request import urlretrieve
+
+from app.exceptions.exceptions import VectorStoreException
+from app.models.dto import (
+    EmbeddingDTO,
+    PatentApprovedEventDTO,
+    PatentRejectedEventDTO,
+    PatentSubmittedEventDTO,
+    QdrantPayloadDTO,
+    SearchResultDTO,
+    SimilarityReportDTO,
+)
+
+
+class IndexingService:
+    """Coordinate the indexing, approval, and rejection flows for patents."""
+
+    def __init__(
+        self,
+        document_extractor=None,
+        embedding_service=None,
+        vector_store_service=None,
+        embedding_repository=None,
+        similarity_engine=None,
+        report_generator=None,
+        notification_producer=None
+    ):
+        self.document_extractor = document_extractor
+        self.embedding_service = embedding_service
+        self.vector_store_service = vector_store_service
+        self.embedding_repository = embedding_repository
+        self.report_generator = report_generator
+        self.similarity_engine = similarity_engine
+        self.notification_producer = notification_producer
+
+    def _download_document(self, payload: PatentSubmittedEventDTO | PatentApprovedEventDTO) -> str:
+        """Download the patent document from the supplied MinIO-compatible object URL."""
+        file_url = payload.fileUrl or ""
+        if not file_url:
+            raise ValueError("payload is missing fileUrl")
+
+        parsed = urlparse(file_url)
+        file_name = Path(parsed.path).name or f"patent-{payload.patentId}.pdf"
+        destination = Path(os.getenv("TMP_DIR", "/tmp")) / file_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        # The service currently uses a direct HTTP download for object URLs.
+        # This keeps the flow simple while still allowing MinIO-style URLs to pass through.
+        urlretrieve(file_url, destination)
+
+        return str(destination)
+
+    def _extract_document_text(self, document_path: str) -> str:
+        """Extract text from a downloaded document using the document extractor."""
+        if self.document_extractor is None:
+            return ""
+        return self.document_extractor.extract_text(document_path)
+
+    def _generate_embedding(self, text: str) -> list[float]:
+        """Generate an embedding for the extracted patent text."""
+        if self.embedding_service is None:
+            return []
+        return self.embedding_service.generate_embedding(text)
+
+    def _store_embedding(self, payload: PatentSubmittedEventDTO | PatentApprovedEventDTO, embedding: list[float]) -> None:
+        """Persist the embedding in the repository as a low-priority task."""
+        if self.embedding_repository is None:
+            return
+        try:
+            embedding_dto = EmbeddingDTO(
+                patent_id=payload.patentId,
+                embedding=embedding,
+                model_name=os.getenv("EMBEDDING_MODEL_NAME", "default-model"),
+            )
+            self.embedding_repository.store_embedding(embedding_dto)
+        except Exception:
+            # The persistence layer is intentionally non-blocking.
+            return
+
+    def _generate_report(self, payload: PatentSubmittedEventDTO | PatentApprovedEventDTO, embedding: list[float]) -> None:
+        """Generate a report using the configured report generator if available."""
+        if self.report_generator is None or self.similarity_engine is None:
+            return
+        
+        matches = self.similarity_engine.search_similar_patents(embedding)
+        report = self.report_generator.generate_report(payload, matches)
+        self.notification_producer.publish_similarity_report(report)
+
+    def _insert_embedding_into_vector_store(self, payload: PatentSubmittedEventDTO | PatentApprovedEventDTO, embedding: list[float]) -> None:
+        """Insert the embedding into the vector store service if available."""
+        if self.vector_store_service is None:
+            return
+
+        qdrant_payload = QdrantPayloadDTO(
+            patent_id=payload.patentId,
+            model_name=os.getenv("EMBEDDING_MODEL_NAME", "default-model"),
+            patent_title=payload.title,
+            # application_number=payload.applicationNumber,
+            submitted_at=payload.submittedAt,
+        )
+        self.vector_store_service.insert_embedding(embedding, qdrant_payload)
+
+
+    def _get_cached_embedding(self, patentId: int) -> Optional[EmbeddingDTO]:
+        """Return an embedding record from the repository cache if it exists."""
+        if self.embedding_repository is None:
+            return None
+        try:
+            return self.embedding_repository.get_embedding(patentId)
+        except Exception:
+            return None
+        
+
+    def _compute_embedding(self, payload: PatentSubmittedEventDTO | PatentApprovedEventDTO) -> list[float]:
+        """Compute an embedding for the patent by downloading and processing the document."""
+        document_path = self._download_document(payload)
+        text = self._extract_document_text(document_path)
+        embedding = self._generate_embedding(text)
+        return embedding
+
+    def handle_submitted_patent(self, payload: PatentSubmittedEventDTO) -> None:
+        """Trigger indexing for a newly submitted patent."""
+        embedding = self._compute_embedding(payload)
+        self._store_embedding(payload, embedding)
+        self._generate_report(payload, embedding)
+
+    def handle_approved_patent(self, payload: PatentApprovedEventDTO) -> None:
+        """Handle approval of a patent by using a cached embedding if available, otherwise recomputing it."""
+        cached_embedding = self._get_cached_embedding(payload.patentId)
+
+        if cached_embedding is not None:
+            embedding = cached_embedding.embedding
+            self._insert_embedding_into_vector_store(payload, embedding)
+            return
+
+        embedding = self._compute_embedding(payload)
+        self._insert_embedding_into_vector_store(payload, embedding)
+
+    def handle_rejected_patent(self, payload: PatentRejectedEventDTO) -> None:
+        """Handle rejection of a patent by removing the embedding from the embedding repository if present."""
+        if self.embedding_repository is not None:
+            try:
+                self.embedding_repository.delete_embedding(payload.patentId)
+            except Exception:
+                return
+```
+
+===== app/services/report_generator.py =====
+```python
+"""
+Generates similarity reports for submitted patents.
+"""
+
+from __future__ import annotations
+
+from app.exceptions.exceptions import ReportGenerationException
+from app.models.dto import (
+    PatentSubmittedEventDTO,
+    PatentApprovedEventDTO,
+    SimilarityReportDTO,
+    SearchResultDTO,
+)
+
+
+class ReportGenerator:
+    """
+    Creates structured similarity reports.
+    """
+
+    def generate_report(
+        self, payload: PatentSubmittedEventDTO | PatentApprovedEventDTO, matches: list[SearchResultDTO],
+    ) -> SimilarityReportDTO:
+        """
+        Generate a similarity report.
+        """
+        try:
+
+            return SimilarityReportDTO(
+                patent_id=payload.patentId,
+                title=payload.title,
+                matches=matches,
+            )
+
+        except Exception as ex:
+
+            raise ReportGenerationException(
+                "Failed to generate similarity report."
+            ) from ex
+```
+
+===== app/services/similarity_engine.py =====
+```python
+"""
+Patent similarity search service.
+"""
+
+from __future__ import annotations
+
+from app.exceptions.exceptions import SimilaritySearchException
+from app.models.dto import SearchResultDTO
+
+
+class SimilarityEngine:
+    """
+    Performs semantic similarity search over indexed patents.
+    """
+
+    def __init__(self, vector_store_service):
+        self.vector_store_service = vector_store_service
+
+    def search_similar_patents(
+        self,
+        embedding: list[float],
+        limit: int = 5,
+    ) -> list[SearchResultDTO]:
+        """
+        Search the vector store for similar patents.
+        """
+
+        try:
+            results = self.vector_store_service.search(
+                embedding,
+                limit,
+            )
+
+            return [
+                SearchResultDTO(
+                    patent_id=result.id,
+                    title=result.payload["title"],
+                    score=result.score,
+                )
+                for result in results
+            ]
+
+        except Exception as ex:
+            raise SimilaritySearchException(
+                "Failed to search similar patents."
+            ) from ex
+```
+
+===== app/services/vector_store_service.py =====
+```python
+"""
+Qdrant vector database service.
+"""
+
+from __future__ import annotations
+
+import os
+
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import (
+    Distance,
+    PointStruct,
+    VectorParams,
+    ScoredPoint
+)
+
+from app.exceptions.exceptions import VectorStoreException
+from app.models.dto import QdrantPayloadDTO
+
+
+
+class VectorStoreService:
+    """
+    Wrapper around Qdrant.
+    """
+
+    def __init__(self, host: str | None = None, port: int | None = None, collection_name: str | None = None):
+
+        self.collection_name = (
+            collection_name
+            or os.getenv(
+                "QDRANT_COLLECTION",
+                "patents",
+            )
+        )
+
+        self.client = QdrantClient(
+            host=host or os.getenv("QDRANT_HOST", "localhost"),
+            port=port or int(os.getenv("QDRANT_PORT", 6333)),
+        )
+
+        self._initialize_collection()
+
+    def insert_embedding(
+        self,
+        embedding: list[float],
+        payload: QdrantPayloadDTO,
+    ) -> None:
+        """
+        Insert or update a patent vector.
+        """
+
+        try:
+            point = PointStruct(
+                id=payload.patent_id,
+                vector=embedding,
+                payload={
+                    "title": payload.patent_title,
+                    # "application_number": payload.application_number,
+                    "submitted_at": payload.submitted_at,
+                    "model": payload.model_name,
+                    "model_name": payload.model_name,
+                },
+            )
+
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[point],
+            )
+
+        except Exception as ex:
+
+            raise VectorStoreException(
+                f"Failed inserting patent {payload.patent_id}"
+            ) from ex
+
+    def search(self, embedding: list[float], limit: int = 5,) -> list[ScoredPoint]:
+        """
+        Return the nearest vectors.
+        """
+        try:
+            response = self.client.query_points(
+                collection_name=self.collection_name,
+                query=embedding,
+                limit=limit,
+            )
+            return response.points
+
+        except Exception as ex:
+            raise VectorStoreException("Vector search failed.") from ex
+
+    def delete_embedding(self, patent_id: int) -> None:
+        """
+        Remove a patent from Qdrant.
+        """
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=[patent_id],
+            )
+        except Exception as ex:
+            raise VectorStoreException(f"Failed deleting patent {patent_id}") from ex
+
+    def collection_exists(self) -> bool:
+        return self.client.collection_exists(self.collection_name)
+
+    def create_collection(self, vector_size: int) -> None:
+
+        self.client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=VectorParams(
+                size=vector_size,
+                distance=Distance.COSINE,
+            ),
+        )
+
+    def _initialize_collection(self) -> None:
+        if self.collection_exists():
+            return
+
+        self.create_collection(
+            vector_size=int(
+                os.getenv(
+                    "EMBEDDING_DIM",
+                    384,
+                )
+            )
+        )
+```
+
+===== scripts/kafka/consume_reports.py =====
+```python
+from __future__ import annotations
+
+import os
+
+from confluent_kafka import Consumer
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "localhost:9092",
+)
+
+TOPIC = os.getenv(
+    "REPORT_TOPIC",
+    "Notifications.similarity-report",
+)
+
+GROUP_ID = os.getenv(
+    "REPORT_CONSUMER_GROUP",
+    "notification-test-consumer",
+)
+
+
+def main():
+    consumer = Consumer(
+        {
+            "bootstrap.servers": BOOTSTRAP_SERVERS,
+            "group.id": GROUP_ID,
+            "auto.offset.reset": "earliest",
+        }
+    )
+
+    consumer.subscribe([TOPIC])
+
+    print(
+        f"[INFO] Listening for reports on '{TOPIC}'..."
+    )
+
+    try:
+        while True:
+            message = consumer.poll(1.0)
+
+            if message is None:
+                continue
+
+            if message.error():
+                print(
+                    f"[ERROR] Kafka error: {message.error()}"
+                )
+                continue
+
+            print(
+                "\n[REPORT RECEIVED]"
+            )
+            print(
+                f"topic     : {message.topic()}"
+            )
+            print(
+                f"partition : {message.partition()}"
+            )
+            print(
+                f"offset    : {message.offset()}"
+            )
+            print(
+                f"value     : {message.value().decode('utf-8')}"
+            )
+
+    except KeyboardInterrupt:
+        print("\n[INFO] Consumer stopped.")
+
+    finally:
+        consumer.close()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+===== scripts/kafka/produce_approval.py =====
+```python
+from __future__ import annotations
+
+import json
+import os
+
+from confluent_kafka import Producer
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "localhost:9092",
+)
+
+TOPIC = os.getenv(
+    "PATENT_APPROVED_TOPIC",
+    "Patents.approved",
+)
+
+
+def delivery_report(err, message):
+    if err is not None:
+        print(
+            f"[ERROR] Failed to publish event: {err}"
+        )
+        return
+
+    print(
+        "[SUCCESS] Patent approval event published "
+        f"to {message.topic()} "
+        f"[partition={message.partition()}, "
+        f"offset={message.offset()}]"
+    )
+
+
+def main():
+    producer = Producer(
+        {
+            "bootstrap.servers": BOOTSTRAP_SERVERS,
+        }
+    )
+
+    # event = {
+    #     "eventId": "test-approval-001",
+    #     "patentId": 1001,
+    #     "title": "AI-based adaptive vehicle control system",
+    #     "applicationNumber": "PAT-2026-0001",
+    #     "fileUrl": "https://patentimages.storage.googleapis.com/5b/d3/99/d524b76163ab96/US5189619.pdf",
+    #     "submittedBy": 42,
+    #     "submittedAt": "2026-08-21T01:00:00",
+    # }
+    event = {
+        "eventId": "test-approval-002",
+        "patentId": 1002,
+        "title": "Control Analysis and Design for Autonomous Vehicles Subject to Imperfect AI-Based Perception",
+        "applicationNumber": "PAT-2026-0002",
+        "fileUrl": "https://arxiv.org/pdf/2509.12137",
+        "submittedBy": 43,
+        "submittedAt": "2026-08-21T01:00:30",
+    }
+
+    print("[INFO] Publishing patent approval event:")
+    print(json.dumps(event, indent=2))
+
+    producer.produce(
+        topic=TOPIC,
+        key=str(event["patentId"]),
+        value=json.dumps(event),
+        callback=delivery_report,
+    )
+
+    producer.flush()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+===== scripts/kafka/produce_submission.py =====
+```python
+from __future__ import annotations
+
+import json
+import os
+
+from confluent_kafka import Producer
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "localhost:9092",
+)
+
+TOPIC = os.getenv(
+    "PATENT_SUBMITTED_TOPIC",
+    "Patents.submitted",
+)
+
+
+def delivery_report(err, message):
+    if err is not None:
+        print(
+            f"[ERROR] Failed to publish event: {err}"
+        )
+        return
+
+    print(
+        "[SUCCESS] Patent submission event published "
+        f"to {message.topic()} "
+        f"[partition={message.partition()}, "
+        f"offset={message.offset()}]"
+    )
+
+
+def main():
+    producer = Producer(
+        {
+            "bootstrap.servers": BOOTSTRAP_SERVERS,
+        }
+    )
+
+    # event = {
+    #     "eventId": "test-submission-001",
+    #     "patentId": 1001,
+    #     "title": "AI-based adaptive vehicle control system",
+    #     "applicationNumber": "PAT-2026-0001",
+    #     "fileUrl": "https://patentimages.storage.googleapis.com/5b/d3/99/d524b76163ab96/US5189619.pdf",
+    #     "submittedBy": 42,
+    #     "submittedAt": "2026-08-21T01:00:00",
+    # }
+
+    event = {
+        "eventId": "test-submission-002",
+        "patentId": 1002,
+        "title": "Control Analysis and Design for Autonomous Vehicles Subject to Imperfect AI-Based Perception",
+        "applicationNumber": "PAT-2026-0002",
+        "fileUrl": "https://arxiv.org/pdf/2509.12137",
+        "submittedBy": 43,
+        "submittedAt": "2026-08-21T01:00:30",
+    }
+
+    print("[INFO] Publishing patent submission event:")
+    print(json.dumps(event, indent=2))
+
+    producer.produce(
+        topic=TOPIC,
+        key=str(event["patentId"]),
+        value=json.dumps(event),
+        callback=delivery_report,
+    )
+
+    producer.flush()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+===== tests/test_dto_and_database.py =====
+```python
+from app.database.models import AdminRecord, EmbeddingRecord
+from app.models.dto import (
+    EmbeddingDTO,
+    PatentApprovedEventDTO,
+    PatentRejectedEventDTO,
+    PatentSubmittedEventDTO,
+    QdrantPayloadDTO,
+    SearchResultDTO,
+    SimilarityReportDTO,
+)
+
+
+def test_event_dtos_parse_payloads_with_expected_fields():
+    submitted_payload = {
+        "eventId": "evt-1",
+        "patentId": 143,
+        "title": "Neural Traffic Prediction for Smart Cities",
+        "applicationNumber": "US-2026-001234",
+        "fileUrl": "https://minio/patents/143.pdf",
+        "submittedBy": 17,
+        "submittedAt": "2026-07-18T10:15:00Z",
+    }
+    approved = PatentApprovedEventDTO.model_validate(submitted_payload)
+    rejected = PatentRejectedEventDTO.model_validate(submitted_payload)
+    submitted = PatentSubmittedEventDTO.model_validate(submitted_payload)
+
+    assert approved.patentId == 143
+    assert rejected.title == submitted_payload["title"]
+    assert submitted.applicationNumber == submitted_payload["applicationNumber"]
+
+
+def test_embedding_and_similarity_report_dtos_model_fields():
+    embedding = EmbeddingDTO(patent_id=143, embedding=[0.1, 0.2], model_name="demo")
+    qdrant = QdrantPayloadDTO(
+        patent_id=143,
+        embedding=[0.1, 0.2],
+        model_name="demo",
+        patent_title="Test Patent",
+        submitted_at="2026-07-18T10:15:00Z",
+    )
+    search_result = SearchResultDTO(patent_id=999, title="Related", score=0.95)
+    report = SimilarityReportDTO(patent_id=143, title="Test Patent", matches=[search_result])
+
+    assert embedding.patent_id == 143
+    assert qdrant.patent_title == "Test Patent"
+    assert report.matches[0].score == 0.95
+
+
+def test_database_models_have_expected_table_names():
+    assert EmbeddingRecord.__tablename__ == "embeddings"
+    assert AdminRecord.__tablename__ == "admins"
+```
+
+===== tests/test_embedding_repository.py =====
+```python
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.database.models import Base, EmbeddingRecord
+from app.models.dto import EmbeddingDTO
+from app.repositories.embedding_repository import EmbeddingRepository
+
+
+def test_embedding_repository_acts_as_cache_for_patent_embeddings():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine)
+    repository = EmbeddingRepository(session_factory=session_factory)
+
+    dto = EmbeddingDTO(
+        patent_id=143,
+        embedding=[0.1, 0.2, 0.3],
+        model_name="default-model",
+    )
+
+    repository.store_embedding(dto)
+    cached = repository.get_embedding(143)
+    deleted = repository.delete_embedding(143)
+
+    assert cached is not None
+    assert cached.patent_id == 143
+    assert cached.embedding == [0.1, 0.2, 0.3]
+    assert deleted is True
+```
+
+===== tests/test_indexing_service.py =====
+```python
+from pathlib import Path
+
+from app.services.indexing_service import IndexingService
+
+
+class DummyExtractor:
+    def extract_text(self, file_path):
+        return f"extracted:{Path(file_path).name}"
+
+
+class DummyEmbeddingService:
+    def generate_embedding(self, text):
+        return [0.1, 0.2, 0.3]
+
+
+class DummyEmbeddingRepository:
+    def __init__(self, cached=None):
+        self.calls = []
+        self.deleted = []
+        self.cached = cached
+
+    def store_embedding(self, payload, embedding, text):
+        self.calls.append((payload, embedding, text))
+
+    def delete_embedding(self, payload):
+        self.deleted.append(payload)
+
+    def get_embedding(self, payload):
+        return self.cached
+
+
+class DummyReportGenerator:
+    def __init__(self):
+        self.calls = []
+
+    def generate_report(self, payload, text, embedding):
+        self.calls.append((payload, text, embedding))
+        return {"status": "generated"}
+
+
+def test_index_patent_runs_download_extract_embed_and_persist_flow(tmp_path):
+    document_path = tmp_path / "patent.pdf"
+    document_path.write_bytes(b"pdf-bytes")
+
+    repository = DummyEmbeddingRepository()
+    report_generator = DummyReportGenerator()
+    service = IndexingService(
+        document_extractor=DummyExtractor(),
+        embedding_service=DummyEmbeddingService(),
+        embedding_repository=repository,
+        report_generator=report_generator,
+    )
+    service._download_document = lambda payload: str(document_path)
+
+    payload = {
+        "eventId": "evt-001",
+        "patentId": 143,
+        "title": "Neural Traffic Prediction for Smart Cities",
+        "applicationNumber": "US-2026-001234",
+        "fileUrl": "https://minio/patents/143.pdf",
+        "submittedBy": 17,
+        "submittedAt": "2026-07-18T10:15:00Z",
+    }
+
+    result = service.index_patent(payload)
+
+    assert result["status"] == "indexed"
+    assert result["patentId"] == 143
+    assert repository.calls[0][0]["patentId"] == 143
+    assert report_generator.calls[0][1].startswith("extracted:")
+    assert report_generator.calls[0][2] == [0.1, 0.2, 0.3]
+
+
+def test_approve_patent_uses_cached_embedding_when_available():
+    class DummyVectorStoreService:
+        def __init__(self):
+            self.calls = []
+
+        def insert_embedding(self, payload, embedding, text):
+            self.calls.append((payload, embedding, text))
+
+    repository = DummyEmbeddingRepository(cached={"embedding": [1.0, 2.0], "text": "cached"})
+    vector_store = DummyVectorStoreService()
+    service = IndexingService(
+        embedding_service=DummyEmbeddingService(),
+        embedding_repository=repository,
+        vector_store_service=vector_store,
+    )
+
+    payload = {"eventId": "evt-002", "patentId": 144, "title": "Autonomous Drone Routing"}
+    result = service.approve_patent(payload)
+
+    assert result["status"] == "approved"
+    assert result["source"] == "cache"
+    assert vector_store.calls[0][0]["patentId"] == 144
+    assert vector_store.calls[0][1] == [1.0, 2.0]
+
+
+def test_reject_patent_deletes_embedding_from_repository_if_present():
+    repository = DummyEmbeddingRepository()
+    service = IndexingService(embedding_repository=repository)
+
+    payload = {"eventId": "evt-003", "patentId": 145, "title": "Spacecraft Navigation"}
+    result = service.reject_patent(payload)
+
+    assert result["status"] == "rejected"
+    assert result["deleted"] is True
+    assert repository.deleted[0]["patentId"] == 145
+```
+
+===== tests/test_kafka_consumer.py =====
+```python
+import json
+
+from app.consumers.kafka_consumer import KafkaPatentConsumer
+from app.models.dto import PatentApprovedEventDTO, PatentRejectedEventDTO, PatentSubmittedEventDTO
+
+
+class DummyIndexingService:
+    def __init__(self):
+        self.calls = []
+
+    def index_patent(self, payload):
+        self.calls.append(("submitted", payload))
+
+    def approve_patent(self, payload):
+        self.calls.append(("approved", payload))
+
+    def reject_patent(self, payload):
+        self.calls.append(("rejected", payload))
+
+
+def test_process_message_dispatches_to_expected_handlers():
+    service = DummyIndexingService()
+    consumer = KafkaPatentConsumer(indexing_service=service)
+
+    payload = {
+        "eventId": "evt-123",
+        "patentId": 143,
+        "title": "Neural Traffic Prediction for Smart Cities",
+        "applicationNumber": "US-2026-001234",
+        "fileUrl": "https://minio/patents/143.pdf",
+        "submittedBy": 17,
+        "submittedAt": "2026-07-18T10:15:00Z",
+    }
+
+    submitted_dto = PatentSubmittedEventDTO.model_validate(payload)
+    approved_dto = PatentApprovedEventDTO.model_validate(payload)
+    rejected_dto = PatentRejectedEventDTO.model_validate(payload)
+
+    consumer.process_message("Patents.submitted", payload)
+    consumer.process_message("Patents.approved", payload)
+    consumer.process_message("Patents.rejected", payload)
+
+    assert service.calls == [
+        ("submitted", submitted_dto),
+        ("approved", approved_dto),
+        ("rejected", rejected_dto),
+    ]
+
+
+def test_consume_messages_polls_and_dispatches_to_service():
+    class DummyKafkaMessage:
+        def __init__(self, topic, value):
+            self._topic = topic
+            self._value = value
+            self._error = None
+
+        def topic(self):
+            return self._topic
+
+        def value(self):
+            return self._value
+
+        def error(self):
+            return self._error
+
+    class DummyKafkaConsumer:
+        def __init__(self, messages):
+            self.messages = list(messages)
+            self.subscribed_topics = None
+
+        def subscribe(self, topics):
+            self.subscribed_topics = topics
+
+        def poll(self, timeout=1.0):
+            if not self.messages:
+                return None
+            return self.messages.pop(0)
+
+        def close(self):
+            return None
+
+    payload = {
+        "eventId": "evt-321",
+        "patentId": 99,
+        "title": "IoT Patent",
+        "applicationNumber": "US-999",
+        "fileUrl": "https://minio/patents/99.pdf",
+        "submittedBy": 1,
+        "submittedAt": "2026-07-18T10:15:00Z",
+    }
+    message = DummyKafkaMessage("Patents.submitted", json.dumps(payload).encode("utf-8"))
+    dummy_consumer = DummyKafkaConsumer([message])
+    service = DummyIndexingService()
+    consumer = KafkaPatentConsumer(indexing_service=service, consumer=dummy_consumer)
+
+    consumer.consume_messages(timeout=0.01, max_messages=1)
+
+    assert service.calls == [("submitted", payload)]
+    assert dummy_consumer.subscribed_topics == list(KafkaPatentConsumer.TOPIC_HANDLERS.keys())
+```
+
+CONFIGURATION AND DEPENDENCIES:
+
+===== docker-compose.yml =====
+```yaml
+version: "3.9"
+
+services:
+
+  ai-service:
+
+    build: .
+
+    env_file:
+      - .env
+
+    ports:
+      - "8000:8000"
+
+    depends_on:
+      - postgres
+      - qdrant
+      - minio
+
+  postgres:
+
+    image: postgres:16
+
+    environment:
+
+      POSTGRES_USER: ai
+
+      POSTGRES_PASSWORD: ai
+
+      POSTGRES_DB: ai_db
+
+    ports:
+      - "5432:5432"
+
+  qdrant:
+
+    image: qdrant/qdrant
+
+    ports:
+      - "6333:6333"
+
+  minio:
+
+    image: minio/minio
+
+    command: server /data
+
+    environment:
+
+      MINIO_ROOT_USER: admin
+
+      MINIO_ROOT_PASSWORD: password
+
+    ports:
+
+      - "9000:9000"
+
+      - "9001:9001"
+```
+
+===== dockerfile =====
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]
+CMD ["python", "-m", "app.main"]
+```
+
+===== requirements.txt =====
+```text
+alembic==1.18.5
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.14.2
+certifi==2026.6.17
+click==8.4.2
+colorama==0.4.6
+confluent-kafka==2.15.0
+fastapi==0.139.2
+filelock==3.30.3
+fsspec==2026.6.0
+greenlet==3.5.3
+grpcio==1.82.1
+h11==0.16.0
+h2==4.3.0
+hf-xet==1.5.2
+hpack==4.2.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.24.0
+hyperframe==6.1.0
+idna==3.18
+iniconfig==2.3.0
+Jinja2==3.1.6
+joblib==1.5.3
+Mako==1.3.12
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==1.2.0
+mpmath==1.3.0
+narwhals==2.24.0
+networkx==3.6.1
+numpy==2.5.1
+packaging==26.2
+pluggy==1.6.0
+portalocker==3.2.0
+protobuf==7.35.1
+psycopg2-binary==2.9.12
+pydantic==2.13.4
+pydantic-settings==2.14.2
+pydantic_core==2.46.4
+Pygments==2.20.0
+pymupdf==1.28.0
+pytest==9.1.1
+pytest-mock==3.15.1
+python-dotenv==1.2.2
+PyYAML==6.0.3
+qdrant-client==1.18.0
+regex==2026.7.10
+rich==15.0.0
+safetensors==0.8.0
+scikit-learn==1.9.0
+scipy==1.18.0
+sentence-transformers==5.6.0
+setuptools==83.0.0
+shellingham==1.5.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+urllib3==2.7.0
+uvicorn==0.51.0
+```
+
+END OF PROJECT CONTEXT.
