@@ -125,6 +125,7 @@ Base path: `/api`. Response envelope is uniform:
 | POST   | `/patents/uploads`        | user  | Get a presigned URL to upload a document straight to storage.|
 | POST   | `/patents`                | user  | Create a patent as a `draft`.                                |
 | GET    | `/patents`                | user  | List (`?page`,`?limit`,`?status`,`?categoryId`,`?submittedBy`,`?jurisdiction`,`?search`). |
+| POST   | `/patents/search`         | user  | Semantic prior-art search, answered by the AI service. |
 | GET    | `/patents/:id`            | user  | Get one patent.                                              |
 | PATCH  | `/patents/:id`            | owner | Edit while `draft` or `declined`.                            |
 | DELETE | `/patents/:id`            | owner | Delete a `draft` (and its stored document).                  |
@@ -262,11 +263,18 @@ breaking change.
 
 ## The AI service
 
-[`AI_module/`](AI_module/) is a Python Kafka consumer owned by another team. It embeds patent
-documents, indexes them in Qdrant, and reports which existing patents a new submission resembles.
-It has **no HTTP API** — there is nothing to call.
+[`AI_module/`](AI_module/) is owned by another team and runs as **two processes from one image**:
 
-It consumes a different contract from the one above: three topics, and a flat payload its
+| Process | Role | How this backend reaches it |
+|---|---|---|
+| `ai-service` | Kafka consumer. Embeds documents, indexes them in Qdrant, reports what a new submission resembles. | Asynchronously, through the outbox. |
+| `ai-service-api` | FastAPI. `POST /api/v1/patents/search` — retrieval plus an LLM explanation. | Synchronously, from `POST /patents/search`. |
+
+The split matters because they fail differently. A dead consumer delays a similarity report and
+blocks nothing at all. A dead API makes exactly one endpoint return 503. Nothing else in the
+system depends on either.
+
+The consumer takes a different contract from the one above: three topics, and a flat payload its
 pydantic DTOs already parse. The backend publishes both from the same outbox rather than asking
 another team to rewrite their service.
 
@@ -289,9 +297,15 @@ nothing to withdraw — but the AI cached an embedding at submission time and ha
   "applicationNumber": "US9876543",   // "PENDING-<id>" when unpublished
   "fileUrl": "s3://patents/patents/7/<uuid>/spec.pdf",
   "submittedBy": 7,
-  "submittedAt": "2026-08-22T10:15:00.000Z"
+  "submittedAt": "2026-08-22T10:15:00.000Z",
+  "abstract": "An apparatus for cooling a beverage container…"
 }
 ```
+
+**`abstract` is load-bearing, despite being optional in their DTO.** On approval it becomes the
+Qdrant payload's `abstract`, which LangChain reads as the document's `page_content`, and the
+explanation prompt grounds every match in it. Drop it and search still finds the right patents
+while every explanation reads "no abstract was available to confirm the overlap".
 
 **`fileUrl` is an `s3://` URI, not a presigned URL.** A presigned URL would expire while the
 event sat in the outbox or on the topic, so any AI outage longer than the TTL would strand
@@ -309,6 +323,35 @@ match, as a **percentage**) and the matches in `comments`. It surfaces through t
 
 Only *approved* patents are ever indexed, so a report can only name a patent that is already
 public — which is what makes it safe to show a submitter.
+
+### Semantic search
+
+`POST /patents/search` takes free text and proxies it to the AI service's search API, which
+embeds it, retrieves from Qdrant, and has an LLM write a summary plus a per-match explanation.
+
+```jsonc
+// POST /patents/search  { "text": "a drink container that chills itself with no power" }
+{
+  "summary": "Two filings describe self-chilling containers using endothermic reactions.",
+  "results": [
+    { "patent": { "id": "11", "title": "Self-chilling drinks can…", "status": "approved", … },
+      "explanation": "Both rely on an endothermic cartridge to cool the contents in place." }
+  ]
+}
+```
+
+Two things happen here that the AI service cannot do for itself. Every matched id is **re-read
+through the caller's visibility rules** — the corpus is not access-controlled and it lags, so a
+patent declined a moment ago still has a vector until `Patents.rejected` is processed. And the
+**AI's ranking is preserved**, which a plain `findMany` would silently replace with id order.
+
+Every failure of the AI service becomes one **503**, never a 500: a missing `GOOGLE_API_KEY`, an
+unreachable Qdrant and a restarting container all mean *try again later*, and the caller cannot
+act on the difference. The reason is logged.
+
+`AI_SEARCH_URL` is optional. Leave it unset and the endpoint reports the feature as unavailable
+while everything else works — which is also how the test suite runs, since it substitutes a fake
+rather than standing up an 8.7 GB container that bills a model per request.
 
 ## Health and readiness
 

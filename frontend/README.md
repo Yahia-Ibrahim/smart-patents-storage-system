@@ -1,8 +1,8 @@
 # Smart Patents — Frontend
 
-A React + TypeScript single-page app for the Smart Patents platform. Enterprise dashboard UI for
-authentication and user management, built on a token-driven design system that future modules
-(patents, inventors, categories) can reuse without redesign.
+A React + TypeScript single-page app for the Smart Patents platform: filing and examining patents,
+prior-art search, and user administration — built on a token-driven design system every screen
+draws from rather than restyling.
 
 ## Stack
 
@@ -57,9 +57,10 @@ src/
     icons/       hand-drawn SVG icon set
   context/       AuthContext, ThemeContext, ToastContext
   hooks/         useAsync (fetch + abort + retry), useDebounced
-  pages/         one folder/file per route
+  pages/         one folder/file per route; patents/ holds the module and its components/
   routes/        ProtectedRoute, AdminRoute, PublicOnlyRoute
-  services/      apiClient (typed, auto-refresh), authService, userService, tokenStore
+  services/      apiClient (typed, auto-refresh), authService, userService, patentService,
+                 catalogService, tokenStore
   styles/        tokens.css, base.css
   types/         shared domain + API types
   utils/         validation (mirrors backend rules), formatting
@@ -72,6 +73,20 @@ Conventions:
 - **Styling comes from the design system.** Components use token variables and shared classes; there
   are no per-page colour or spacing overrides.
 - `@/` aliases `src/` (configured in both `tsconfig.json` and `vite.config.ts`).
+
+Three things in the Patents module are worth knowing before you change them:
+
+- **A document is uploaded when it is chosen, not when the form is saved.** The browser PUTs
+  straight to object storage over a presigned URL and the form only carries the resulting key, so
+  bytes never touch the API. Abandoning the form therefore orphans an object — an accepted cost,
+  and cheaper than streaming multi-megabyte specifications through Node. The presigned URL must
+  name a host the *browser* can reach; if uploads fail inside Docker, check `S3_PUBLIC_ENDPOINT`
+  on the backend rather than the frontend.
+- **Inventor order is list position.** The API requires a contiguous `1..N`, so `order` is derived
+  from the index and a gap is unrepresentable rather than a validation error.
+- **Anything the AI wrote is visibly marked as generated.** Explanations sit in their own tinted
+  block rather than in the same type as the patent's own text, and the similarity card is labelled
+  advisory — because it is. The AI gates nothing; a person makes every decision.
 
 ## Auth & data flow
 
@@ -90,7 +105,12 @@ Conventions:
 | `/signup`         | Public        | Register (creates a `user`)                         |
 | `/`               | Authenticated | Dashboard (admin sees directory stats)              |
 | `/profile`        | Authenticated | View/edit profile, change password                  |
-| `/patents`        | Authenticated | Placeholder. The backend Patents API is fully implemented; this page is not built yet. |
+| `/patents`        | Authenticated | Registry list: search, status/category filters, "only mine", pagination |
+| `/patents/new`    | Authenticated | File a patent — form plus direct-to-storage document upload |
+| `/patents/search` | Authenticated | Prior-art search: semantic, with per-match LLM explanations |
+| `/patents/:id`    | Authenticated | Filing detail, examination trail, and the actions the viewer is entitled to |
+| `/patents/:id/edit` | Owner       | Amend a `draft` or `declined` filing |
+| `/review-queue`   | Admin only    | Filings awaiting a decision, ranked by AI prior-art score |
 | `/design-system`  | Authenticated | Living component & token showcase                    |
 | `/users`          | Admin only    | User directory (search, role filter, pagination)    |
 | `/users/:id`      | Admin only    | User detail with audit info                          |

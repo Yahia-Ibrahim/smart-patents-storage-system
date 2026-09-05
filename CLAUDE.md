@@ -30,7 +30,7 @@ npm run relay:dev        # same, under nodemon
 npm run consumer         # AI similarity reports -> PATENT_REVIEW (its own process)
 npm run consumer:dev     # same, under nodemon
 npm run connect:register -- <template>   # register/update a Kafka Connect connector, see kafka-connect/README.md
-docker compose up        # backend + relay + ai-reports + postgres (:5433) + minio (:9000/:9001) + kafka (:29092) + kafka-connect (:8083) + kafka-ui (:8080) + qdrant (:6333) + ai-service
+docker compose up        # backend + relay + ai-reports + postgres (:5433) + minio (:9000/:9001) + kafka (:29092) + kafka-connect (:8083) + kafka-ui (:8080) + qdrant (:6333) + ai-service + ai-service-api (:8000)
 ```
 
 **Use `127.0.0.1`, not `localhost`, in host-facing URLs.** Docker publishes on `0.0.0.0`
@@ -75,6 +75,16 @@ architecture; the short version:
 - `frontend/src/components/ui/` — the reusable component library (Button, Input, Modal, Table,
   Badge, Toast, …), each with co-located CSS. Import from `@/components/ui`.
 - `frontend/src/services/` — typed API client with automatic access-token refresh; `@/` aliases `src/`.
+- `frontend/src/pages/patents/` — the Patents module: list, detail, create/edit, admin review queue,
+  and prior-art search, with its shared pieces under `components/`.
+- **Documents are uploaded when chosen, not when the form is saved.** The browser PUTs straight to
+  storage over a presigned URL, so abandoning the form orphans an object — the accepted cost of
+  keeping multi-megabyte bodies off the API.
+- **Inventor order is list position, never a typed number.** The API demands a contiguous 1..N;
+  deriving `order` from the index makes a gap unrepresentable rather than a validation error.
+- **AI output is always marked as generated.** Explanations render in their own tinted block rather
+  than in the same type as the patent's own text, and the similarity card says "advisory" — because
+  it is: the AI gates nothing.
 - **Design language:** IBM Plex superfamily (Serif headings, Sans UI, Mono for every id/reference);
   a blueprint-indigo primary with a brass "certification seal" accent; status/role rendered as
   ink-stamp badges. Grounded in the patent-drawing / legal-document subject on purpose.
@@ -205,6 +215,12 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
   path-traversal and cross-user-overwrite primitive; `keyBelongsToUser` is the real check.
 - **Upload size is enforced after upload**, in `verifyDocument`. A presigned PUT cannot express
   a maximum content length.
+- **Presigning and calling use different endpoints.** `S3_PUBLIC_ENDPOINT` is what goes *into* a
+  presigned URL, because a browser follows it; `S3_ENDPOINT` is what this process dials. In
+  compose they differ — `http://minio:9000` resolves only inside `patents-net`, so signing with
+  it produced upload URLs no browser could use. They default to the same value, which is right
+  for a host-run backend or real S3. One setter swaps both clients so the test fake still covers
+  signing.
 - **The S3 client sets `requestChecksumCalculation: 'WHEN_REQUIRED'`.** Since AWS SDK v3.729 the
   default bakes an `x-amz-checksum-crc32` of an *empty* body into presigned PUT URLs. MinIO
   tolerates the mismatch; real S3 rejects it.
@@ -245,9 +261,19 @@ Request flow: `routes/` → rate limiter → validation chain → auth guard →
 
 ## AI service integration
 
-`AI_module/` is a **Python Kafka consumer owned by another team** — not an HTTP API, so there is
-no endpoint to call and no port to publish. Treat it as an external dependency: make the smallest
+`AI_module/` is **owned by another team**. Treat it as an external dependency: make the smallest
 change that makes integration work, and record anything else rather than fixing it.
+
+It runs as **two processes from one image**, and the distinction matters because they fail
+differently:
+
+| Process | What it is | How the backend reaches it |
+|---|---|---|
+| `ai-service` | Kafka consumer. Embeds documents, reports similarity. | Asynchronously, over the outbox. A dead one delays a report and blocks nothing. |
+| `ai-service-api` | `uvicorn app.api.main:app` — `POST /api/v1/patents/search`. | Synchronously, from `POST /patents/search`. A dead one makes that one endpoint 503. |
+
+The HTTP half arrived with the module's LangChain rewrite and is the **only** synchronous
+dependency the backend has on the AI service.
 
 - **The backend adapts to the AI's contract, not the reverse.** `src/events/aiEvents.js` builds a
   flat, camelCase payload matching its pydantic DTOs. This is deliberately *not* merged with
@@ -285,9 +311,30 @@ change that makes integration work, and record anything else rather than fixing 
   *database* failure still throws, so the offset stays uncommitted and the message is redelivered.
 - **Only approved patents enter Qdrant**, so a similarity report can only ever name a patent that
   is already public. That is what makes it safe to show one to a submitter.
-- Changes made to `AI_module/` are limited to `_download_document` (s3 support), the
-  `requirements.txt` encoding, and a `.env.example`. Everything else found while reading is
-  recorded in `AI_INTEGRATION_PLAN.md`, not fixed.
+- **The event payload carries `abstract`, and that is not decoration.** It is optional in their
+  DTO, but on approval it becomes the Qdrant payload's `abstract`, which LangChain is configured
+  to read as the document's `page_content` (`content_payload_key="abstract"`), and the explanation
+  prompt grounds every match in it. Drop the field and search still finds the right patents while
+  every explanation degrades to "no abstract was available".
+- **`POST /patents/search` proxies the AI's search API** (`src/services/aiSearchService.js`,
+  client behind a setter in `src/config/aiSearch.js`). It does two things the AI cannot do for
+  itself: re-reads every matched id through `visibilityWhere`, because the corpus is not access
+  controlled and lags — a patent declined a moment ago still has a vector until
+  `Patents.rejected` is processed — and preserves the AI's ranking, which `findMany` would
+  otherwise replace with id order.
+- **Every AI failure is one 503 with one message.** A caller cannot act on the difference between
+  a missing `GOOGLE_API_KEY`, an empty Qdrant and a restarting container; all three mean *try
+  again later*. The distinction stays in the log. `AI_SEARCH_URL` is optional — unset, search
+  reports itself unavailable and nothing else changes, which is also how `npm test` runs.
+- **`GOOGLE_API_KEY` is needed only for explanations.** Retrieval works without it. The container
+  starts either way (see below), so a missing key is a per-request 503, not a dead service.
+- Changes made to `AI_module/` are limited to: `_download_document` (s3 support),
+  `handle_rejected_patent` (clearing Qdrant, a real bug), the `requirements.txt` encoding plus
+  `minio`, a `.env.example`, and two cold-start fixes the search API brought with it —
+  `get_vector_store()` creating the collection it would otherwise raise on, and the FastAPI
+  lifespan building the pipeline on first request rather than at boot, so Qdrant, the model
+  download and the API key are no longer all required for the process to start. Everything else
+  found while reading is recorded in `AI_INTEGRATION_PLAN.md`, not fixed.
 
 ## Known issues
 

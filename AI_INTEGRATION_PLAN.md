@@ -201,3 +201,93 @@ fixed. See §6.
 | Stale `node_modules` volume | The Node services mount an anonymous volume over `node_modules`, which survives `docker compose up` and silently masks dependency changes. Needs `--renew-anon-volumes` after any dependency change. |
 | Qdrant upgrades | v1.18 cannot read storage written by v1.12; changing the pin requires wiping `data/qdrant`. Fine while the corpus is rebuildable from Postgres, not once it is not. |
 | Report topic partitioning | The AI publishes reports with **no message key**, so they round-robin across partitions. On the single-partition default this is fine; on a multi-partition topic two reports for one patent could be handled concurrently and the last write would win arbitrarily. Fixing it properly means keying the produce call in their service. |
+
+---
+
+# Second pass — the finalized module
+
+`origin/ai-module` moved `a3f9500` → `96d07f8` ("got langchain running"). The
+module was re-imported wholesale and our edits re-applied on top, so the diff
+against their branch is exactly our changes and nothing else.
+
+## 8. What changed on their side
+
+It is no longer only a Kafka consumer. Alongside it there is now a **FastAPI
+service**: `POST /api/v1/patents/search` embeds a query, retrieves from Qdrant
+through `langchain-qdrant`, and has **Gemini** (`langchain_google_genai`) write
+an overall summary plus a per-match explanation.
+
+| | Before | Now |
+|---|---|---|
+| Entry points | `python -m app.main` | that, plus `uvicorn app.api.main:app` |
+| Event DTO | 7 required fields | + optional `abstract` |
+| Qdrant payload | title, submitted_at, model | + `abstract`, + a nested `metadata` dict |
+| Exceptions | `app/exceptions.py` | `app/exceptions/exceptions.py` |
+| Their tests | 4 pass, 3 fail, 2 hang | deleted |
+| New config | — | `QDRANT_URL`, `GOOGLE_API_KEY`, `LLM_MODEL_NAME`, `SEARCH_TOP_K` |
+
+Three statements in the previous pass are now wrong and have been corrected in
+`CLAUDE.md`: it *is* an HTTP API, it *does* have a port to publish, and
+`app/config/settings.py` being empty is no longer the only config story.
+
+## 9. What the backend had to do
+
+**`abstract` on the event.** Easy to read as decoration; it is not. On approval
+it becomes the Qdrant payload's `abstract`, LangChain is configured with
+`content_payload_key="abstract"`, and the prompt tells the model to ground every
+explanation in it. Omitting it leaves search working and every explanation
+reading "no abstract was available to confirm the overlap" — a failure invisible
+from our side, which is why there is now a test asserting the field.
+
+**`POST /patents/search`.** Proxied rather than exposed directly, for two
+reasons the AI service cannot handle itself:
+
+- *Visibility.* Its corpus is not access-controlled and it lags. Only approved
+  patents are inserted, but a patent declined a moment ago still has its vector
+  until `Patents.rejected` is processed. Every returned id is re-read through
+  the same `visibilityWhere` as every other patent read, and anything that does
+  not come back is dropped.
+- *Ranking.* `findMany` returns rows in id order. Re-reading without restoring
+  the AI's order would silently destroy the only thing the endpoint sells.
+
+Every failure becomes one 503 with one message, because a caller cannot act on
+the difference between a missing API key, an empty Qdrant, and a restarting
+container. The reason stays in the log.
+
+The client sits behind a setter like the storage and Kafka clients, so the suite
+substitutes a fake instead of standing up an 8.7 GB container that bills a model
+per request.
+
+## 10. Two more edits to their code, both cold-start
+
+Neither is a refactor; both are "the container cannot start".
+
+| Edit | Without it |
+|---|---|
+| `get_vector_store()` creates the collection first | `from_existing_collection()` raises when the collection is absent. Only the consumer creates it, and compose can start the API first. Their own `VectorStoreService` does the creating, so the collection's shape still has one definition. |
+| The FastAPI lifespan builds the pipeline lazily | Startup required Qdrant reachable, the embedding model downloaded, **and** `GOOGLE_API_KEY` set — all at once. Any one missing left the container in a restart loop with even `/docs` unreachable. Now a missing key is a per-request error the backend reports as a 503. |
+
+## 11. Ours, not theirs: presigned URLs
+
+Recorded last pass as pre-existing and deferred; fixed this pass, because the
+frontend made it load-bearing. Compose gives the backend `S3_ENDPOINT:
+http://minio:9000`, which resolves only inside `patents-net`, and it signed
+upload URLs with that host — correctly signed, and unusable from any browser.
+Uploading a document is the first thing a user does, so the whole flow was
+unreachable outside the Docker network.
+
+Signing and calling now use separate endpoints (`S3_PUBLIC_ENDPOINT` /
+`S3_ENDPOINT`), defaulting to the same value. One setter still swaps both
+clients so the suite's single fake keeps covering signing.
+
+## 12. Still not fixed, and why
+
+Everything in §7 stands. Added by this pass:
+
+| Area | Issue |
+|---|---|
+| `PatentRetriever.retrieve` | Three `print()` calls per document on every search. Log noise, not a defect. |
+| Qdrant payload duplication | The payload now carries `title`/`abstract`/`model_name` at the top level *and* again inside `metadata`, because LangChain reads the nested copy and their own `SimilarityEngine` reads the flat one. Two copies that can disagree; harmless while both are written in one place. |
+| Vectors written before the rewrite | Have no `abstract` and no `metadata`, so LangChain renders them with empty `page_content`. Re-approving reindexes them; nothing does it automatically. |
+| Report keying | Unchanged from §7 — reports are still published without a message key. |
+| `GOOGLE_API_KEY` | No key, no explanations. Retrieval is unaffected, and the backend degrades to a 503 rather than a broken page, but the feature's headline is the explanation. |
