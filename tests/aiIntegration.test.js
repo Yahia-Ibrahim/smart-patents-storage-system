@@ -378,6 +378,44 @@ describe('similarity reports consumed from the AI service', () => {
     expect(ai.reviewer).toBeNull();
     expect(JSON.parse(ai.comments).source).toBe('ai-similarity');
   });
+
+  /**
+   * The report shape is theirs to change, and it just did: the LangChain
+   * rewrite added `abstract` to every match so the explanation chain has
+   * something to ground itself in.
+   *
+   * We deliberately do not store it — a match links to a patent the reader can
+   * open, and copying abstracts into a review row would duplicate the largest
+   * field on the record for no gain. What matters is that an unrecognised field
+   * is ignored rather than treated as malformed, because the alternative is
+   * this consumer silently discarding every report the day they add another.
+   */
+  it('ignores fields their DTO gained without discarding the report', async () => {
+    const { token, adminToken } = await setup();
+    const patent = await approvedPatent(token, adminToken);
+
+    await handleMessage(
+      message({
+        ...report(patent.id, [
+          {
+            patent_id: 999,
+            title: 'Prior art',
+            score: 0.71,
+            abstract: 'An apparatus for cooling a beverage container.',
+          },
+        ]),
+        abstract: 'A field the report did not used to carry.',
+      }),
+    );
+
+    const [review] = await reviewsFor(patent.id);
+
+    expect(Number(review.aiConfidenceScore)).toBeCloseTo(71, 2);
+
+    const stored = JSON.parse(review.comments);
+
+    expect(stored.matches).toEqual([{ patentId: '999', title: 'Prior art', score: 0.71 }]);
+  });
 });
 
 /**
