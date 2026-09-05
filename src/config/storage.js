@@ -14,12 +14,11 @@ const config = require('./env');
  */
 
 let client = null;
+let presignClient = null;
 
-const getStorageClient = () => {
-  if (client) return client;
-
-  client = new S3Client({
-    endpoint: config.storage.endpoint,
+const build = (endpoint) =>
+  new S3Client({
+    endpoint,
     region: config.storage.region,
     forcePathStyle: config.storage.forcePathStyle,
     credentials: {
@@ -37,11 +36,37 @@ const getStorageClient = () => {
     requestChecksumCalculation: 'WHEN_REQUIRED',
   });
 
+/** The client this process makes real calls with: head, delete, bucket checks. */
+const getStorageClient = () => {
+  if (!client) client = build(config.storage.endpoint);
   return client;
 };
 
-const setStorageClient = (replacement) => {
-  client = replacement;
+/**
+ * The client used to *sign* URLs somebody else will follow.
+ *
+ * SigV4 signs the host, so the endpoint baked into a presigned URL has to be
+ * the one the eventual caller can actually reach. In compose that is not the
+ * one this process uses -- see `publicEndpoint` in config/env.js. When the two
+ * are the same, which is the common case, this is the same client and there is
+ * no second connection pool.
+ */
+const getPresignClient = () => {
+  if (config.storage.publicEndpoint === config.storage.endpoint) return getStorageClient();
+
+  if (!presignClient) presignClient = build(config.storage.publicEndpoint);
+
+  return presignClient;
 };
 
-module.exports = { getStorageClient, setStorageClient };
+/**
+ * Substitutes both clients at once. Tests get one fake and it covers signing
+ * and calling alike; a fake that only replaced one of them would leave the
+ * other quietly dialling a real endpoint.
+ */
+const setStorageClient = (replacement) => {
+  client = replacement;
+  presignClient = replacement;
+};
+
+module.exports = { getStorageClient, getPresignClient, setStorageClient };

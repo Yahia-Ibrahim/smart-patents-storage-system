@@ -18,6 +18,11 @@ services:
       # Object storage. The backend only ever signs URLs against this; the
       # actual bytes go client -> minio directly, never through here.
       S3_ENDPOINT: http://minio:9000
+      # Where the *browser* reaches MinIO. Presigned URLs are signed with this
+      # instead of the internal name above, which resolves only inside
+      # patents-net -- sign with that and every upload URL is unusable from a
+      # browser. Set it to your public MinIO origin when deploying.
+      S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://127.0.0.1:9000}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-patents}
       S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
@@ -159,6 +164,10 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-admin123123}
+      # The browser PUTs upload bytes straight here, cross-origin from the SPA.
+      # This is MinIO's default, set explicitly because the upload flow depends
+      # on it and a silent CORS rejection looks exactly like a broken presign.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_API_CORS_ALLOW_ORIGIN:-*}
     ports:
       - "9000:9000"
       - "9001:9001"

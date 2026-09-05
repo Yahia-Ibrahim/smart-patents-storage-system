@@ -182,3 +182,79 @@ describe('helpers: bcrypt cost', () => {
     expect(floored.loaded.BCRYPT_COST).toBe(4);
   });
 });
+
+/**
+ * Presigned URLs are followed by somebody else's browser, not by this process.
+ *
+ * In compose the backend reaches MinIO as `http://minio:9000`, which resolves
+ * only inside patents-net. Signing an upload URL with that host produces
+ * something correctly signed and completely unusable — and the failure looks
+ * like a CORS or credentials problem rather than an addressing one, which is
+ * why it is worth pinning down here.
+ */
+describe('config/storage: signing endpoint', () => {
+  const PUBLIC = 'https://files.example.com';
+
+  it('reuses one client when the two endpoints agree', () => {
+    const { loaded } = loadWith(BASE, '../../src/config/storage');
+
+    // The common case — a host-run backend, or real S3. No second pool.
+    expect(loaded.getPresignClient()).toBe(loaded.getStorageClient());
+  });
+
+  it('signs with a separate client when the public endpoint differs', async () => {
+    const { loaded } = loadWith(
+      { ...BASE, S3_PUBLIC_ENDPOINT: PUBLIC },
+      '../../src/config/storage',
+    );
+
+    const internal = loaded.getStorageClient();
+    const presign = loaded.getPresignClient();
+
+    expect(presign).not.toBe(internal);
+    await expect(presign.config.endpoint()).resolves.toMatchObject({
+      hostname: 'files.example.com',
+    });
+    await expect(internal.config.endpoint()).resolves.toMatchObject({ hostname: '127.0.0.1' });
+  });
+
+  /**
+   * The suite installs one fake for the whole process. If the setter reached
+   * only one of the two clients, the other would quietly dial a real endpoint
+   * from inside a unit test.
+   */
+  it('substitutes both clients from the one setter', () => {
+    const { loaded } = loadWith(
+      { ...BASE, S3_PUBLIC_ENDPOINT: PUBLIC },
+      '../../src/config/storage',
+    );
+
+    const fake = { send: async () => ({}) };
+    loaded.setStorageClient(fake);
+
+    expect(loaded.getStorageClient()).toBe(fake);
+    expect(loaded.getPresignClient()).toBe(fake);
+  });
+
+  it('signs download URLs with the public client, not the internal one', async () => {
+    await jest.isolateModulesAsync(async () => {
+      process.env = { ...ORIGINAL_ENV, ...BASE, S3_PUBLIC_ENDPOINT: PUBLIC };
+
+      try {
+        const storageConfig = require('../../src/config/storage');
+        const storageService = require('../../src/services/storageService');
+        const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+
+        getSignedUrl.mockClear();
+        await storageService.presignDownload('patents/1/abc/spec.pdf');
+
+        const [clientUsed] = getSignedUrl.mock.calls[0];
+
+        expect(clientUsed).toBe(storageConfig.getPresignClient());
+        expect(clientUsed).not.toBe(storageConfig.getStorageClient());
+      } finally {
+        process.env = ORIGINAL_ENV;
+      }
+    });
+  });
+});

@@ -69,6 +69,21 @@ const build = () => {
 
     storage: {
       endpoint: externalsRequired ? require_('S3_ENDPOINT') : env.S3_ENDPOINT,
+      /**
+       * The host that goes *into* presigned URLs, which is not always the host
+       * this process talks to.
+       *
+       * In compose the backend reaches MinIO at `http://minio:9000`, a name
+       * that only resolves inside patents-net. Signing with it produces URLs
+       * that are correct, signed, and unusable: the browser doing the upload is
+       * not on that network. Meanwhile `headObject` and `deleteObject` are made
+       * by this process and do need the internal name.
+       *
+       * So the two are separate. Defaults to the internal endpoint, which is
+       * right whenever the API and its clients see storage the same way -- a
+       * host-run backend, or real S3.
+       */
+      publicEndpoint: env.S3_PUBLIC_ENDPOINT || env.S3_ENDPOINT,
       region: env.S3_REGION || 'us-east-1',
       bucket: externalsRequired ? require_('S3_BUCKET') : env.S3_BUCKET || 'patents',
       accessKeyId: externalsRequired ? require_('S3_ACCESS_KEY_ID') : env.S3_ACCESS_KEY_ID,

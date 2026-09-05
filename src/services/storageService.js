@@ -10,7 +10,7 @@ const {
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const config = require('../config/env');
-const { getStorageClient } = require('../config/storage');
+const { getStorageClient, getPresignClient } = require('../config/storage');
 const { badRequest } = require('../utils/errors');
 
 /**
@@ -88,8 +88,11 @@ const presignUpload = async ({ userId, filename, contentType }) => {
   // different type than it declared. Size is enforced on the way back in
   // (headObject in patentService) because a presigned PUT cannot express a
   // maximum length on its own.
+  // Signed against the *public* endpoint: the client that follows this URL is a
+  // browser, not this process, and in compose the two do not see MinIO at the
+  // same address.
   const uploadUrl = await getSignedUrl(
-    getStorageClient(),
+    getPresignClient(),
     new PutObjectCommand({ Bucket: BUCKET, Key: objectKey, ContentType: contentType }),
     { expiresIn: config.storage.uploadUrlTtlSeconds },
   );
@@ -104,7 +107,7 @@ const presignUpload = async ({ userId, filename, contentType }) => {
 };
 
 const presignDownload = async (objectKey) =>
-  getSignedUrl(getStorageClient(), new GetObjectCommand({ Bucket: BUCKET, Key: objectKey }), {
+  getSignedUrl(getPresignClient(), new GetObjectCommand({ Bucket: BUCKET, Key: objectKey }), {
     expiresIn: config.storage.downloadUrlTtlSeconds,
   });
 
