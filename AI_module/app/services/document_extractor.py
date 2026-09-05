@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import fitz
 
-from app.exceptions import DocumentExtractionException
+from app.exceptions.exceptions import DocumentExtractionException
 
 
 class DocumentExtractor:

@@ -14,7 +14,7 @@ from qdrant_client.http.models import (
     ScoredPoint
 )
 
-from app.exceptions import VectorStoreException
+from app.exceptions.exceptions import VectorStoreException
 from app.models.dto import QdrantPayloadDTO
 
 
@@ -60,6 +60,19 @@ class VectorStoreService:
                     "submitted_at": payload.submitted_at,
                     "model": payload.model_name,
                     "model_name": payload.model_name,
+                    "abstract": payload.abstract,
+                    
+                    # LangChain reads this for doc.page_content
+                    "page_content": payload.abstract,  # Or whichever field holds main text
+                    
+                    # LangChain unpacks this sub-dict into doc.metadata
+                    "metadata": {
+                        "title": payload.patent_title,
+                        "submitted_at": payload.submitted_at,
+                        "model": payload.model_name,
+                        "model_name": payload.model_name,
+                        "abstract": payload.abstract,
+                    }
                 },
             )
 

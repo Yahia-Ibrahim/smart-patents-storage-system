@@ -4,7 +4,7 @@ Generates similarity reports for submitted patents.
 
 from __future__ import annotations
 
-from app.exceptions import ReportGenerationException
+from app.exceptions.exceptions import ReportGenerationException
 from app.models.dto import (
     PatentSubmittedEventDTO,
     PatentApprovedEventDTO,

@@ -52,14 +52,22 @@ def main():
     #     "submittedAt": "2026-08-21T01:00:00",
     # }
     event = {
-        "eventId": "test-approval-002",
-        "patentId": 1002,
-        "title": "Control Analysis and Design for Autonomous Vehicles Subject to Imperfect AI-Based Perception",
-        "applicationNumber": "PAT-2026-0002",
-        "fileUrl": "https://arxiv.org/pdf/2509.12137",
+        "eventId": "test-approval-005",
+        "patentId": 1005,
+        "title": "Roadside-Cooperative Autonomous Driving: From Data Platform to Vision-Language End-to-End Reasoning",
+        "applicationNumber": "PAT-2026-0005",
+        "fileUrl": "https://arxiv.org/pdf/2608.21032",
         "submittedBy": 43,
         "submittedAt": "2026-08-21T01:00:30",
+        "abstract": "Vehicle-to-Everything (V2X) cooperation enables beyond-line-of-sight perception, mitigating occlusions in single-vehicle sensing. However, existing V2X benchmarks provide limited support for closed-loop evaluation and language-grounded supervision, hindering the development of vision-language models (VLMs) for end-to-end cooperative driving. To address these limitations, we introduce V2XBench, a simulation platform featuring synchronized ego--roadside sensing and closed-loop evaluation, together with Chat-V2XBench, a progressively structured VQA dataset for cooperative reasoning. Building upon this benchmark infrastructure, we propose AURORA, an end-to-end cooperative driving framework. Equipped with a dual-view perception architecture, AURORA mitigates spatial and semantic discrepancies across ego and roadside viewpoints through a query-level Cross-View Query Alignment and Fusion (CQAF) module. Leveraging the resulting unified tokens, a LoRA-adapted VLM bridges semantic reasoning and generative trajectory planning. Extensive closed-loop evaluations on V2XBench demonstrate that AURORA achieves state-of-the-art performance in heavily occluded scenarios, with a Route Completion rate of 98.21% and a Driving Score of 76.02, while requiring low roadside communication bandwidth. Ultimately, this work pioneers an extensible V2X--VLM paradigm, paving the way for next-generation cooperative autonomous driving."
     }
+
+
+
+
+
+
+
 
     print("[INFO] Publishing patent approval event:")
     print(json.dumps(event, indent=2))

@@ -9,13 +9,24 @@ services:
     env_file:
       - .env
 
-    ports:
-      - "8000:8000"
-
     depends_on:
       - postgres
       - qdrant
       - minio
+
+  ai-service-api:
+    build: .
+    container_name: ai-service-api
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+
+    ports:
+      - "8000:8000"
+
+    env_file:
+      - .env
+
+    depends_on:
+      - qdrant
 
   postgres:
 
