@@ -17,7 +17,15 @@ npm run prisma:migrate                           # apply migrations
 npm run prisma:seed                              # create the initial admin from env vars
 npm run dev                                      # API on http://localhost:5000
 npm run relay:dev                                # outbox -> Kafka, in a second terminal
+npm run consumer:dev                             # AI reports -> reviews, in a third
 ```
+
+The frontend is a separate app in [`frontend/`](frontend/): `npm install && npm run dev` there
+puts the UI on `http://localhost:5173`, proxying `/api` to the backend.
+
+The AI service is optional for everything except similarity reports and prior-art search:
+`docker compose up -d qdrant ai-service ai-service-api`. Without it the registry works
+end to end and search reports itself unavailable.
 
 > **Address Docker services as `127.0.0.1`, never `localhost`.** Docker publishes ports on
 > `0.0.0.0` (IPv4 only) while Node resolves `localhost` to `::1` first, which produces
