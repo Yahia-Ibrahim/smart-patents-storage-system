@@ -1,6 +1,12 @@
 const patentService = require('../services/patentService');
+const aiSearchService = require('../services/aiSearchService');
 const { sendSuccess } = require('../utils/response');
-const { toPatentDto, toPatentDetailDto, toPatentReviewDto } = require('../utils/dto');
+const {
+  toPatentDto,
+  toPatentDetailDto,
+  toPatentReviewDto,
+  toPatentSearchMatchDto,
+} = require('../utils/dto');
 
 /**
  * Thin HTTP layer: unwrap the request, call the service, map to a DTO.
@@ -40,6 +46,23 @@ exports.listPatents = async (req, res, next) => {
         limit: result.limit,
         totalPages: result.totalPages,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Semantic search. The only endpoint that calls the AI service synchronously;
+ * everything else between the two systems goes through Kafka.
+ */
+exports.searchPatents = async (req, res, next) => {
+  try {
+    const result = await aiSearchService.search(req.body.text, req.user);
+
+    sendSuccess(res, 200, {
+      summary: result.summary,
+      results: result.matches.map((match) => toPatentSearchMatchDto(match, req.user)),
     });
   } catch (error) {
     next(error);

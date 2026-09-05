@@ -1,5 +1,6 @@
 const { setStorageClient } = require('../src/config/storage');
 const { setProducer } = require('../src/config/kafka');
+const { setSearchClient } = require('../src/config/aiSearch');
 
 /**
  * In-memory stand-ins for MinIO and Kafka.
@@ -110,12 +111,60 @@ class FakeProducer {
   }
 }
 
+/**
+ * The AI service's search API.
+ *
+ * The real one is an 8.7 GB container that downloads an embedding model and
+ * calls Gemini per request, so a test that touched it would be a test nobody
+ * runs. Only `isConfigured` and `search` exist, because those are the only two
+ * methods aiSearchService calls.
+ *
+ * `configured` defaults to true: the interesting default is a working AI
+ * service, and the not-configured case is one test that flips it.
+ */
+class FakeAiSearch {
+  constructor() {
+    this.reset();
+  }
+
+  isConfigured() {
+    return this.configured;
+  }
+
+  async search(text) {
+    this.calls.push(text);
+
+    if (this.failure) throw this.failure;
+
+    return this.response;
+  }
+
+  /** Answer the next search with these matches. Shaped like the real body. */
+  respondWith({ summary = 'Found related patents.', results = [] } = {}) {
+    this.response = { summary, results };
+  }
+
+  /** Make the next search throw, standing in for a down or wedged service. */
+  failWith(message) {
+    this.failure = new Error(message);
+  }
+
+  reset() {
+    this.configured = true;
+    this.calls = [];
+    this.failure = null;
+    this.response = { summary: '', results: [] };
+  }
+}
+
 const fakeStorage = new FakeStorage();
 const fakeProducer = new FakeProducer();
+const fakeAiSearch = new FakeAiSearch();
 
 const installFakes = () => {
   setStorageClient(fakeStorage);
   setProducer(fakeProducer);
+  setSearchClient(fakeAiSearch);
 };
 
-module.exports = { fakeStorage, fakeProducer, installFakes };
+module.exports = { fakeStorage, fakeProducer, fakeAiSearch, installFakes };

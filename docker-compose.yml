@@ -26,6 +26,12 @@ services:
       # Present so /ready can report outbox backlog; the API itself never
       # produces to Kafka - the relay service below does.
       KAFKA_BROKERS: kafka:9092
+      # The AI service's HTTP half, for POST /patents/search. The only
+      # synchronous dependency the API has on the AI service; everything else
+      # between them is Kafka. Unset it and search reports itself unavailable
+      # while the rest of the API is unaffected.
+      AI_SEARCH_URL: http://ai-service-api:8000
+      AI_SEARCH_TIMEOUT_MS: ${AI_SEARCH_TIMEOUT_MS:-25000}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
     ports:
       - "5000:5000"
@@ -275,7 +281,17 @@ services:
   # report back on Notifications.similarity-report, which patents-ai-reports
   # above consumes.
   #
-  # It is a Kafka consumer, not an HTTP service - there is no port to publish.
+  # Since the module was finalised it is two processes from one image, so it
+  # appears here twice:
+  #
+  #   ai-service      - the Kafka consumer described above. No port; nothing
+  #                     calls it, it calls Kafka.
+  #   ai-service-api  - uvicorn serving POST /api/v1/patents/search, which the
+  #                     backend proxies. Published on 8000 for its own /docs.
+  #
+  # One image, one model cache, two commands. Splitting them matters: a search
+  # request must not queue behind document embedding, and the consumer must not
+  # die because an LLM call did.
 
   qdrant:
     # Pinned to match the qdrant-client version in AI_module/requirements.txt.
@@ -303,7 +319,12 @@ services:
     # it because compose names images after the project is not worth the disk.
     image: patents-ai:dev
     container_name: patents-ai-service
-    environment:
+    command: ["python", "-m", "app.main"]
+    # Anchored and merged into ai-service-api below rather than copied. The two
+    # halves have to agree on Qdrant, the collection, and the embedding model:
+    # if they drift, one indexes into a collection the other never queries and
+    # nothing anywhere reports an error.
+    environment: &ai-service-env
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REPORT_TOPIC: ${AI_REPORT_TOPIC:-Notifications.similarity-report}
       # Its own database on the shared Postgres instance, not the patents
@@ -312,6 +333,11 @@ services:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-patents}:${POSTGRES_PASSWORD:-patents}@postgres:5432/${AI_POSTGRES_DB:-ai_db}
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
+      # Both spellings, deliberately: the consumer's VectorStoreService reads
+      # HOST/PORT and the LangChain retriever reads QDRANT_URL. Pointing them
+      # at different Qdrants would have the two halves index and query
+      # different collections, and nothing would report an error.
+      QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-patents}
       # Documents arrive as s3://bucket/key URIs and are fetched with these.
       S3_ENDPOINT: http://minio:9000
@@ -340,3 +366,54 @@ services:
       - patents-net
     restart: unless-stopped
 
+  # The same image, serving the search API instead of consuming Kafka.
+  #
+  # A separate container rather than a thread in the consumer: a search request
+  # must not queue behind a document being downloaded and embedded, and the
+  # consumer must not die because an LLM call did.
+  ai-service-api:
+    build:
+      context: ./AI_module
+      dockerfile: dockerfile
+    image: patents-ai:dev
+    container_name: patents-ai-service-api
+    command:
+      ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *ai-service-env
+      # The explanation chain calls Gemini. Deliberately not `:?` like
+      # JWT_SECRET: without a key the container still starts and serves /docs,
+      # and only a search request fails - which the backend reports as a 503
+      # rather than a broken page. Retrieval is not what needs the key.
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-gemini-2.5-flash}
+      # Candidates pulled from Qdrant before the LLM explains them. Every one
+      # costs prompt tokens, so this is a cost dial as much as a quality one.
+      SEARCH_TOP_K: ${SEARCH_TOP_K:-5}
+    ports:
+      # Published for its own /docs; the backend reaches it over patents-net.
+      - "8000:8000"
+    volumes:
+      - ./data/hf-models:/models
+    depends_on:
+      qdrant:
+        condition: service_started
+    healthcheck:
+      # The image is python:3.12-slim, which has no curl. /openapi.json is
+      # served by FastAPI itself and needs neither Qdrant nor a model, so this
+      # reports "the process is up and routing" and nothing more - exactly the
+      # question depends_on should be asking.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - patents-net
+    restart: unless-stopped

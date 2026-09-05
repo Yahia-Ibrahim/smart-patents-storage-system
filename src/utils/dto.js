@@ -152,6 +152,16 @@ const toPatentDetailDto = (patent, viewer) => ({
   documentKey: patent.documentKey,
 });
 
+/**
+ * A semantic search hit: the live patent, plus the AI's prose for why it came
+ * back. Kept as two fields rather than merged onto the patent, so nothing can
+ * mistake a generated sentence for a stored one.
+ */
+const toPatentSearchMatchDto = ({ patent, explanation }, viewer) => ({
+  patent: toPatentDto(patent, viewer),
+  explanation: explanation ?? null,
+});
+
 const toPatentReviewDto = (review, viewer) => ({
   id: String(review.id),
   patentId: String(review.patentId),
@@ -174,4 +184,5 @@ module.exports = {
   toPatentDto,
   toPatentDetailDto,
   toPatentReviewDto,
+  toPatentSearchMatchDto,
 };

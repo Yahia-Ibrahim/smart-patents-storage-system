@@ -102,6 +102,25 @@ const build = () => {
       aiReportGroupId: env.AI_REPORT_GROUP_ID || 'patents-backend-ai-reports',
     },
 
+    /**
+     * The AI service's HTTP half, added when it grew a FastAPI search API
+     * alongside its Kafka consumer.
+     *
+     * Optional on purpose, and the only integration point that is. The Kafka
+     * half works with no HTTP configuration at all, so a backend without
+     * AI_SEARCH_URL reports semantic search as unavailable rather than
+     * refusing to boot -- which is what makes `npm test`, and a deployment
+     * that has not stood the AI up yet, still work.
+     */
+    ai: {
+      // Trailing slashes stripped so joining the path cannot produce `//`.
+      searchUrl: (env.AI_SEARCH_URL || '').replace(/\/+$/, ''),
+      // Generous: the request embeds the query, queries Qdrant, and then waits
+      // on an LLM round trip. Short enough that a wedged AI service cannot pin
+      // a request handler indefinitely.
+      searchTimeoutMs: integer('AI_SEARCH_TIMEOUT_MS', 25000),
+    },
+
     outbox: {
       pollIntervalMs: integer('OUTBOX_POLL_INTERVAL_MS', 1000),
       batchSize: integer('OUTBOX_BATCH_SIZE', 50),

@@ -62,6 +62,7 @@ describe('events published to the AI service', () => {
     const [{ payload }] = await aiEvents();
 
     expect(Object.keys(payload).sort()).toEqual([
+      'abstract',
       'applicationNumber',
       'eventId',
       'fileUrl',
@@ -93,6 +94,27 @@ describe('events published to the AI service', () => {
 
     expect(payload.fileUrl).toMatch(/^s3:\/\/[^/]+\/patents\//);
     expect(payload.fileUrl).not.toMatch(/X-Amz-Signature|\?/);
+  });
+
+  /**
+   * The abstract is what the search feature explains matches with.
+   *
+   * On approval it lands in the Qdrant payload, LangChain is configured to read
+   * that key as the document's page_content, and the explanation prompt is told
+   * to ground every match in it. Drop the field and search still finds the right
+   * patents while every explanation degrades to "no abstract was available".
+   * Cheap to assert, and the failure it prevents is invisible from our side.
+   */
+  it('carries the abstract the explanation chain grounds matches in', async () => {
+    const { token } = await setup();
+    const draft = await createDraftPatent(token);
+
+    await submit(draft.id, token);
+
+    const [{ payload }] = await aiEvents();
+
+    expect(payload.abstract).toBe(draft.abstract);
+    expect(typeof payload.abstract).toBe('string');
   });
 
   /** Required by their DTO, nullable here, and read by nothing on their side. */

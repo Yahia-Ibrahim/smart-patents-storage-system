@@ -160,6 +160,25 @@ const declinePatentValidation = [
   handleValidationErrors,
 ];
 
+/**
+ * Semantic search takes free text, not a keyword.
+ *
+ * The floor is low because the AI's own DTO only demands one character, and
+ * rejecting a three-word query here would be this API inventing a rule the
+ * service it proxies does not have. The ceiling matches the abstract field:
+ * pasting a whole abstract in to find prior art is the intended use.
+ */
+const semanticSearchValidation = [
+  body('text')
+    .isString()
+    .withMessage('text must be a string')
+    .bail()
+    .trim()
+    .isLength({ min: 3, max: 10000 })
+    .withMessage('Search text must be between 3 and 10000 characters'),
+  handleValidationErrors,
+];
+
 const listPatentsValidation = [
   query('page').optional().isInt({ min: 1 }).withMessage('Page must be a positive integer').toInt(),
   query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('Limit must be between 1 and 100').toInt(),
@@ -196,4 +215,5 @@ module.exports = {
   approvePatentValidation,
   declinePatentValidation,
   listPatentsValidation,
+  semanticSearchValidation,
 };

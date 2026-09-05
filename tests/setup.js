@@ -32,7 +32,7 @@ jest.mock('@aws-sdk/s3-request-presigner', () => ({
 jest.setTimeout(30000);
 
 const prisma = require('../src/config/prisma');
-const { fakeStorage, fakeProducer, installFakes } = require('./fakes');
+const { fakeStorage, fakeProducer, fakeAiSearch, installFakes } = require('./fakes');
 
 // Storage and Kafka are swapped for in-memory fakes for the whole suite, so
 // `npm test` needs Postgres and nothing else.
@@ -53,6 +53,7 @@ beforeEach(async () => {
   await global.resetDatabase();
   fakeStorage.reset();
   fakeProducer.reset();
+  fakeAiSearch.reset();
 });
 
 afterAll(async () => {

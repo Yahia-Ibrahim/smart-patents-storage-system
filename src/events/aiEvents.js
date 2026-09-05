@@ -63,6 +63,14 @@ const documentUri = (documentKey) =>
  * loosened — nothing in the AI service actually reads `applicationNumber`
  * (every use of it is commented out), so a placeholder costs nothing and saves
  * a change to their code.
+ *
+ * `abstract` is optional on their side and easy to mistake for decoration, but
+ * it is what the new search feature reads. On approval it becomes the Qdrant
+ * payload's `abstract`, which LangChain is configured to use as the document's
+ * `page_content` (`content_payload_key="abstract"`), and the explanation prompt
+ * is told to ground every match in it. Omit it and search still finds the right
+ * patents, but every explanation reads "no abstract was available to confirm
+ * the overlap".
  */
 const basePayload = (patent) => ({
   eventId: crypto.randomUUID(),
@@ -72,6 +80,7 @@ const basePayload = (patent) => ({
   fileUrl: documentUri(patent.documentKey),
   submittedBy: toInt(patent.submittedBy),
   submittedAt: (patent.submittedAt ?? patent.createdAt ?? new Date()).toISOString(),
+  abstract: patent.abstract ?? null,
 });
 
 /**

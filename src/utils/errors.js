@@ -25,6 +25,16 @@ const notFound = (message = 'Resource not found') => new AppError(message, 404, 
 const conflict = (message) => new AppError(message, 409, { code: 'CONFLICT' });
 const tooManyRequests = (message) => new AppError(message, 429, { code: 'TOO_MANY_REQUESTS' });
 
+/**
+ * For a dependency that is down rather than a request that is wrong.
+ *
+ * Distinct from a 500 on purpose: 503 tells the caller the request itself was
+ * fine and retrying later is the right move, which is exactly the situation
+ * when the AI service is restarting or has no model credentials configured.
+ */
+const serviceUnavailable = (message = 'Service temporarily unavailable') =>
+  new AppError(message, 503, { code: 'SERVICE_UNAVAILABLE' });
+
 module.exports = {
   AppError,
   badRequest,
@@ -33,4 +43,5 @@ module.exports = {
   notFound,
   conflict,
   tooManyRequests,
+  serviceUnavailable,
 };

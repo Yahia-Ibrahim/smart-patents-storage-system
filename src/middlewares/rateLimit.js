@@ -68,4 +68,31 @@ const refreshLimiter = rateLimit({
   limit: 60,
 });
 
-module.exports = { loginRateLimitKey, loginLimiter, signupLimiter, refreshLimiter };
+/**
+ * Semantic search, which is the one endpoint that costs money per call.
+ *
+ * Every request embeds the query, hits Qdrant, and then waits on an LLM round
+ * trip billed per token, so an unthrottled loop here is a bill rather than a
+ * load problem. Keyed on the authenticated user rather than the IP, which the
+ * route makes possible by mounting this *after* `requireUser`: quota should
+ * follow the account, and an office behind one NAT should not share one.
+ *
+ * The IP fallback is unreachable through the route as mounted and exists so a
+ * future unauthenticated mount degrades to IP keying rather than collapsing
+ * every caller onto a single bucket.
+ */
+const aiSearchLimiter = rateLimit({
+  ...baseOptions,
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  keyGenerator: (req) =>
+    req.user?.userId ? `user:${req.user.userId}` : `ip:${ipKeyGenerator(req.ip)}`,
+});
+
+module.exports = {
+  loginRateLimitKey,
+  loginLimiter,
+  signupLimiter,
+  refreshLimiter,
+  aiSearchLimiter,
+};

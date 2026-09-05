@@ -11,6 +11,7 @@ const {
   deletePatent,
   listReviews,
   getDocumentUrl,
+  searchPatents,
 } = require('../controllers/patentController');
 const {
   uploadRequestValidation,
@@ -19,9 +20,11 @@ const {
   approvePatentValidation,
   declinePatentValidation,
   listPatentsValidation,
+  semanticSearchValidation,
   idParamValidation,
 } = require('../utils/validation');
 const { requireUser, requireAdmin } = require('../middlewares/auth');
+const { aiSearchLimiter } = require('../middlewares/rateLimit');
 const { idempotency } = require('../middlewares/idempotency');
 
 const router = express.Router();
@@ -118,6 +121,67 @@ router.post('/', requireUser, createPatentValidation, idempotency(), createPaten
  *       200: { description: Paginated patents }
  */
 router.get('/', requireUser, listPatentsValidation, listPatents);
+
+/**
+ * @openapi
+ * /patents/search:
+ *   post:
+ *     summary: Semantic prior-art search
+ *     description: >
+ *       Free-text search over approved patents, answered by the AI service:
+ *       the query is embedded, matched against the vector corpus, and an LLM
+ *       writes an overall summary plus one explanation per match.
+ *
+ *
+ *       POST rather than GET because the query is a passage of text - pasting a
+ *       whole abstract in to look for prior art is the intended use, and that
+ *       does not belong in a URL.
+ *
+ *
+ *       Only approved patents are ever indexed, and every match is re-read
+ *       through the caller's visibility rules before it is returned, so a
+ *       result can never name a patent the caller could not already open.
+ *
+ *
+ *       Returns 503, never 500, when the AI service is unreachable or has no
+ *       model credentials: the request was fine and retrying later is the right
+ *       move. The rest of the API does not depend on it.
+ *     tags: [Patents]
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [text]
+ *             properties:
+ *               text:
+ *                 type: string
+ *                 minLength: 3
+ *                 maxLength: 10000
+ *                 example: A beverage container that chills its contents without external power
+ *     responses:
+ *       200:
+ *         description: Ranked matches, most relevant first, with the AI's reasoning
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 summary: { type: string }
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       patent: { type: object }
+ *                       explanation: { type: string, nullable: true }
+ *       400: { description: Missing or out-of-range text }
+ *       429: { description: Search quota exhausted for this account }
+ *       503: { description: The AI service is unavailable or not configured }
+ */
+router.post('/search', requireUser, aiSearchLimiter, semanticSearchValidation, searchPatents);
 
 /**
  * @openapi
