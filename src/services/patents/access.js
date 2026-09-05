@@ -17,6 +17,27 @@ const PATENT_INCLUDE = {
   submitter: { select: { id: true, name: true, email: true } },
   categories: { include: { category: true } },
   inventors: { include: { inventor: true }, orderBy: { inventorOrder: 'asc' } },
+  /**
+   * The AI service's most recent similarity report, if it has produced one.
+   *
+   * Joined here rather than fetched per row by the client, because the review
+   * queue's whole job is ranking pending filings by it — a request per patent
+   * to answer "how similar is this to something we already granted" is the
+   * shape that makes a reviewer stop looking.
+   *
+   * Only the headline number and its timestamp: `comments` carries the full
+   * match list as JSON and has no business being repeated across a 20-row page.
+   * The detail view reads that from GET /patents/:id/reviews.
+   *
+   * Selecting rather than including keeps this from becoming a way to read
+   * review rows: the DTO decides who sees even this much (`aiSummaryDto`).
+   */
+  reviews: {
+    where: { reviewStage: 'ai_filter' },
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+    select: { aiConfidenceScore: true, createdAt: true },
+  },
 };
 
 const isAdmin = (user) => user?.role === ROLES.ADMIN;

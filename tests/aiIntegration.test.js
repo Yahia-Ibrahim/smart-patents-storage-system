@@ -379,3 +379,108 @@ describe('similarity reports consumed from the AI service', () => {
     expect(JSON.parse(ai.comments).source).toBe('ai-similarity');
   });
 });
+
+/**
+ * The AI's headline score, carried on the patent itself.
+ *
+ * The review queue ranks pending filings by it, so it has to arrive with the
+ * list rather than a request per row. That makes it a second place review data
+ * can escape from, and the reason these tests exist: `GET /patents/:id/reviews`
+ * is owner-or-admin, and this must be too.
+ */
+describe('AI similarity on the patent DTO', () => {
+  const report = (patentId, score) => ({
+    patent_id: Number(patentId),
+    title: 'A submitted patent',
+    matches: [{ patent_id: 99999, title: 'Prior art', score }],
+  });
+
+  const fetchPatent = (id, token) =>
+    api().get(`/api/patents/${id}`).set(authHeader(token));
+
+  it('is null before the AI has reported', async () => {
+    const { token } = await setup();
+    const draft = await createDraftPatent(token);
+
+    const res = await fetchPatent(draft.id, token);
+
+    expect(res.body.data.aiSimilarity).toBeNull();
+  });
+
+  it('carries the top match score once a report lands', async () => {
+    const { token } = await setup();
+    const draft = await createDraftPatent(token);
+    await submit(draft.id, token);
+
+    await aiReportService.recordSimilarityReport(report(draft.id, 0.7630));
+
+    const res = await fetchPatent(draft.id, token);
+
+    // Stored and returned as a percentage, matching the Decimal(5,2) column.
+    expect(res.body.data.aiSimilarity.score).toBeCloseTo(76.3, 1);
+    expect(res.body.data.aiSimilarity.analysedAt).toBeDefined();
+  });
+
+  it('reaches the submitter and any admin, and nobody else', async () => {
+    const { token, adminToken } = await setup();
+    await createUser({ name: 'Stranger', email: 'stranger@example.com' });
+    const strangerToken = (await login('stranger@example.com')).accessToken;
+
+    // Approved, so the stranger can see the patent at all — which is exactly
+    // the case where leaking the score would be invisible.
+    const patent = await approvedPatent(token, adminToken);
+    await aiReportService.recordSimilarityReport(report(patent.id, 0.9));
+
+    const asOwner = await fetchPatent(patent.id, token);
+    const asAdmin = await fetchPatent(patent.id, adminToken);
+    const asStranger = await fetchPatent(patent.id, strangerToken);
+
+    expect(asOwner.body.data.aiSimilarity.score).toBeCloseTo(90, 1);
+    expect(asAdmin.body.data.aiSimilarity.score).toBeCloseTo(90, 1);
+    expect(asStranger.status).toBe(200);
+    expect(asStranger.body.data.aiSimilarity).toBeNull();
+  });
+
+  it('appears on the list, not only the detail view', async () => {
+    const { token } = await setup();
+    const draft = await createDraftPatent(token);
+    await submit(draft.id, token);
+    await aiReportService.recordSimilarityReport(report(draft.id, 0.42));
+
+    const res = await api().get('/api/patents').set(authHeader(token));
+    const listed = res.body.data.patents.find((patent) => patent.id === draft.id);
+
+    expect(listed.aiSimilarity.score).toBeCloseTo(42, 1);
+  });
+
+  /** A report with no matches is a real answer: "nothing resembles this". */
+  it('reports a null score when the AI found nothing similar', async () => {
+    const { token } = await setup();
+    const draft = await createDraftPatent(token);
+    await submit(draft.id, token);
+
+    await aiReportService.recordSimilarityReport({
+      patent_id: Number(draft.id),
+      title: 'A submitted patent',
+      matches: [],
+    });
+
+    const res = await fetchPatent(draft.id, token);
+
+    // Present, because the AI has run; scoreless, because it found nothing.
+    expect(res.body.data.aiSimilarity).not.toBeNull();
+    expect(res.body.data.aiSimilarity.score).toBeNull();
+  });
+
+  /** Review rows must not become readable through the patent itself. */
+  it('does not expose the review rows themselves', async () => {
+    const { token } = await setup();
+    const draft = await createDraftPatent(token);
+    await submit(draft.id, token);
+    await aiReportService.recordSimilarityReport(report(draft.id, 0.5));
+
+    const res = await fetchPatent(draft.id, token);
+
+    expect(res.body.data.reviews).toBeUndefined();
+  });
+});

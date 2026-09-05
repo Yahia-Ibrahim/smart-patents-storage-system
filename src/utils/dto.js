@@ -73,6 +73,44 @@ const canSeeEmailOf = (viewer, subjectUserId) => {
   return subjectUserId !== null && subjectUserId !== undefined && viewer.userId === subjectUserId;
 };
 
+/**
+ * Review data is owner-or-admin, exactly like `GET /patents/:id/reviews`.
+ *
+ * The same predicate as `canSeeEmailOf`, deliberately spelled separately: they
+ * answer different questions about different subjects, and collapsing them
+ * would mean a later change to one silently rewriting the other's rule.
+ */
+const canSeeReviewsOf = (viewer, submittedBy) => {
+  if (!viewer) return false;
+  if (viewer.role === 'admin') return true;
+  return submittedBy !== null && submittedBy !== undefined && viewer.userId === submittedBy;
+};
+
+/**
+ * The AI's headline similarity, for a caller entitled to review data.
+ *
+ * Null covers three different situations that the UI treats the same way: the
+ * caller may not see reviews, the AI has not reported yet (normal for the first
+ * seconds of a filing's life, and for anything filed while the AI was down), or
+ * it reported no matches. None of them is an error — the AI gates nothing.
+ *
+ * `score` is a percentage, matching the column: PATENT_REVIEW.ai_confidence_score
+ * is Decimal(5,2), so two decimals on a percentage keeps a gradation that two
+ * decimals on a 0..1 cosine would round away.
+ */
+const toAiSummaryDto = (patent, viewer) => {
+  if (!canSeeReviewsOf(viewer, patent.submittedBy)) return null;
+
+  const [report] = patent.reviews || [];
+
+  if (!report) return null;
+
+  return {
+    score: decimalToNumber(report.aiConfidenceScore),
+    analysedAt: report.createdAt,
+  };
+};
+
 const partyDto = (party, viewer) =>
   party
     ? {
@@ -133,6 +171,7 @@ const toPatentDto = (patent, viewer) => ({
   categories: (patent.categories || []).map((link) => toCategoryDto(link.category)),
   inventors: (patent.inventors || []).map(toPatentInventorDto),
   hasDocument: Boolean(patent.documentKey),
+  aiSimilarity: toAiSummaryDto(patent, viewer),
   submittedAt: patent.submittedAt,
   reviewedAt: patent.reviewedAt,
   createdAt: patent.createdAt,
@@ -175,6 +214,8 @@ const toPatentReviewDto = (review, viewer) => ({
 
 module.exports = {
   canSeeEmailOf,
+  canSeeReviewsOf,
+  toAiSummaryDto,
   toUserDto,
   toAdminUserDto,
   toInventorDto,
