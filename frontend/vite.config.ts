@@ -2,9 +2,14 @@ import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// The backend serves the API at http://localhost:5000/api. In dev we proxy
+// The backend serves the API at http://127.0.0.1:5000/api. In dev we proxy
 // /api to it so the app is same-origin (no CORS preflight, no absolute URLs in
 // the client). In production, set VITE_API_URL to the deployed API base.
+//
+// 127.0.0.1 rather than "localhost": this proxy runs in Node, which resolves
+// localhost to ::1 first, while the backend (and Docker's published ports) bind
+// IPv4. The symptom is intermittent ECONNREFUSED that looks like the API being
+// down.
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -16,7 +21,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        target: 'http://127.0.0.1:5000',
         changeOrigin: true,
       },
     },

@@ -240,3 +240,60 @@ export const SealIcon = (p: IconProps) => (
     <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18" />
   </Icon>
 );
+
+/**
+ * The AI motif. A four-point sparkle rather than a robot or a brain: the AI
+ * here is advisory — it annotates a filing, it does not decide anything — and a
+ * quieter mark says that better than machinery would.
+ */
+export const SparkIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.7L12 18l-1.7-5.6L4.8 10.7 10.3 9 12 3.5Z" />
+    <path d="M18.5 3v3M20 4.5h-3M6 17.5v2.5M7.25 18.75h-2.5" />
+  </Icon>
+);
+
+export const UploadIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M21 15v3.5A2.5 2.5 0 0 1 18.5 21h-13A2.5 2.5 0 0 1 3 18.5V15" />
+    <path d="M12 15V3M7.5 7.5 12 3l4.5 4.5" />
+  </Icon>
+);
+
+export const DownloadIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M21 15v3.5A2.5 2.5 0 0 1 18.5 21h-13A2.5 2.5 0 0 1 3 18.5V15" />
+    <path d="M12 3v12M7.5 10.5 12 15l4.5-4.5" />
+  </Icon>
+);
+
+export const TrashIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 7h16M10 4h4M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
+    <path d="M10.5 11v7M13.5 11v7" />
+  </Icon>
+);
+
+export const SendIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M21 3 10.5 13.5" />
+    <path d="M21 3 14.5 21l-4-7.5L3 9.5 21 3Z" />
+  </Icon>
+);
+
+/** Review / examination: a document under a lens. */
+export const ReviewIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4" />
+    <path d="M14 3l5 5v2M14 3v5h5" />
+    <circle cx="16.5" cy="16.5" r="3.5" />
+    <path d="m21 21-2-2" />
+  </Icon>
+);
+
+export const XCircleIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="m15 9-6 6M9 9l6 6" />
+  </Icon>
+);

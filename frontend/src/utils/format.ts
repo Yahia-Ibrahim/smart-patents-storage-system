@@ -53,3 +53,34 @@ export function initials(name: string): string {
 export function userRef(id: string): string {
   return `USR-${id.padStart(6, '0')}`;
 }
+
+/** A short, monospace-friendly reference from a patent id: 42 -> "PAT-000042". */
+export function patentRef(id: string): string {
+  return `PAT-${id.padStart(6, '0')}`;
+}
+
+/** 0.7630 -> "76.3%". Similarity scores are 0..1 everywhere except the review row. */
+export function similarityPercent(score: number): string {
+  return `${(score * 100).toFixed(1)}%`;
+}
+
+/**
+ * How a similarity score should read to a reviewer.
+ *
+ * The bands are a presentation choice, not a rule the system enforces: the AI
+ * is advisory and gates nothing, so nothing downstream branches on these. They
+ * exist so a reviewer scanning a list can tell 0.76 from 0.08 without doing
+ * arithmetic.
+ */
+export function similarityTone(score: number): 'danger' | 'warning' | 'neutral' {
+  if (score >= 0.75) return 'danger';
+  if (score >= 0.45) return 'warning';
+  return 'neutral';
+}
+
+/** Bytes -> "2.4 MB", for upload limits and file pickers. */
+export function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}

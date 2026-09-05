@@ -5,7 +5,9 @@ import {
   CloseIcon,
   DashboardIcon,
   FileIcon,
+  ReviewIcon,
   SealIcon,
+  SparkIcon,
   UserIcon,
   UsersIcon,
 } from '@/components/icons';
@@ -22,7 +24,9 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: <DashboardIcon size={20} />, end: true },
-  { to: '/patents', label: 'Patents', icon: <FileIcon size={20} /> },
+  { to: '/patents', label: 'Patents', icon: <FileIcon size={20} />, end: true },
+  { to: '/patents/search', label: 'Prior-art Search', icon: <SparkIcon size={20} /> },
+  { to: '/review-queue', label: 'Review Queue', icon: <ReviewIcon size={20} />, adminOnly: true },
   { to: '/users', label: 'User Directory', icon: <UsersIcon size={20} />, adminOnly: true },
   { to: '/profile', label: 'My Profile', icon: <UserIcon size={20} /> },
   { to: '/design-system', label: 'Design System', icon: <SealIcon size={20} /> },

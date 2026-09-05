@@ -1,18 +1,87 @@
 import { Link } from 'react-router-dom';
 import { Badge, ButtonLink, Card, PageHeader, RoleBadge, Stat } from '@/components/ui';
 import {
+  CheckCircleIcon,
   FileIcon,
   PlusIcon,
+  ReviewIcon,
   SealIcon,
   ShieldIcon,
+  SparkIcon,
   UserIcon,
   UsersIcon,
 } from '@/components/icons';
 import { useAuth } from '@/context/AuthContext';
 import { useAsync } from '@/hooks/useAsync';
 import { userService } from '@/services/userService';
+import { patentService } from '@/services/patentService';
 import { formatDate, userRef } from '@/utils/format';
 import './Dashboard.css';
+
+/**
+ * Registry counts.
+ *
+ * Each figure is a `limit: 1` list call read for its `pagination.total` rather
+ * than a dedicated stats endpoint: the counts are already authoritative there,
+ * already scoped to what this caller may see, and one endpoint that cannot
+ * drift out of step with the list beats a second one that can.
+ */
+function RegistryStats({ isAdmin, userId }: { isAdmin: boolean; userId: string }) {
+  const mine = useAsync(
+    (signal) => patentService.list({ submittedBy: userId, limit: 1 }, signal),
+    [userId],
+  );
+  const approved = useAsync(
+    (signal) => patentService.list({ status: 'approved', limit: 1 }, signal),
+    [],
+  );
+  // Non-admins see only their own pending filings here, which is the number
+  // that matters to them: "how many of mine are waiting". For an admin the
+  // same query is the whole queue.
+  const pending = useAsync(
+    (signal) =>
+      patentService.list(
+        { status: 'pending_admin', limit: 1, submittedBy: isAdmin ? undefined : userId },
+        signal,
+      ),
+    [isAdmin, userId],
+  );
+
+  const loading = mine.loading || approved.loading || pending.loading;
+  const failed = Boolean(mine.error || approved.error || pending.error);
+
+  // An em dash rather than a fabricated 0: a failed count is unknown, and
+  // "0 approved patents" is a claim this page has no right to make.
+  const show = (n: number | undefined) => (failed ? '—' : (n ?? 0));
+
+  return (
+    <div className="dashboard__stats">
+      <Stat
+        label="Your filings"
+        value={show(mine.data?.pagination.total)}
+        loading={loading}
+        icon={<FileIcon size={20} />}
+        tone="brand"
+      />
+      <Stat
+        label={isAdmin ? 'Awaiting review' : 'Yours in review'}
+        value={show(pending.data?.pagination.total)}
+        loading={loading}
+        icon={<ReviewIcon size={20} />}
+        tone="accent"
+        hint={isAdmin ? 'Across every submitter' : undefined}
+      />
+      <Stat
+        label="Approved patents"
+        value={show(approved.data?.pagination.total)}
+        loading={loading}
+        icon={<CheckCircleIcon size={20} />}
+        tone="success"
+        hint="Searchable as prior art"
+      />
+    </div>
+  );
+}
 
 function AdminStats() {
   const all = useAsync((signal) => userService.listUsers({ limit: 1 }, signal), []);
@@ -23,7 +92,6 @@ function AdminStats() {
   const total = all.data?.pagination.total;
   const adminCount = admins.data?.pagination.total;
 
-  // Don't invent a "0" when a fetch failed — an em dash reads as "unknown".
   const show = (n: number | undefined) => (failed ? '—' : (n ?? 0));
 
   return (
@@ -66,6 +134,8 @@ export function DashboardPage() {
         title={`Welcome back, ${firstName}`}
         description="Here's the state of your patent registry workspace."
       />
+
+      <RegistryStats isAdmin={isAdmin} userId={user.id} />
 
       {isAdmin && <AdminStats />}
 
@@ -112,15 +182,35 @@ export function DashboardPage() {
           <span className="eyebrow">Quick actions</span>
           <h2 className="dashboard__actions-title">Get things done</h2>
           <div className="dashboard__action-list">
-            <Link to="/patents" className="dashboard__action">
+            <Link to="/patents/new" className="dashboard__action">
               <span className="dashboard__action-icon dashboard__action-icon--brand">
                 <FileIcon size={20} />
               </span>
               <span className="dashboard__action-text">
-                <strong>Browse patents</strong>
-                <small>Search and review filings</small>
+                <strong>File a patent</strong>
+                <small>Start a draft and submit it for review</small>
               </span>
             </Link>
+            <Link to="/patents/search" className="dashboard__action">
+              <span className="dashboard__action-icon dashboard__action-icon--accent">
+                <SparkIcon size={20} />
+              </span>
+              <span className="dashboard__action-text">
+                <strong>Search prior art</strong>
+                <small>Find related filings by meaning, not keywords</small>
+              </span>
+            </Link>
+            {isAdmin && (
+              <Link to="/review-queue" className="dashboard__action">
+                <span className="dashboard__action-icon dashboard__action-icon--brand">
+                  <ReviewIcon size={20} />
+                </span>
+                <span className="dashboard__action-text">
+                  <strong>Work the review queue</strong>
+                  <small>Filings awaiting an examiner decision</small>
+                </span>
+              </Link>
+            )}
             <Link to="/profile" className="dashboard__action">
               <span className="dashboard__action-icon dashboard__action-icon--neutral">
                 <UserIcon size={20} />
@@ -151,10 +241,11 @@ export function DashboardPage() {
             <SealIcon size={22} />
           </span>
           <div>
-            <p className="dashboard__note-title">Patents module — coming next</p>
+            <p className="dashboard__note-title">Every filing carries an audit trail</p>
             <p className="dashboard__note-body">
-              Filing submission, AI pre-screening, and examiner review reuse this same design
-              language. This workspace is ready to grow with them.
+              Submissions are analysed automatically for prior art, and every examiner decision is
+              recorded against the filing with its reasoning. The analysis is advisory — a person
+              makes the decision.
             </p>
           </div>
         </div>
