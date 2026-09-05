@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
@@ -16,6 +17,14 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
+  },
+  // Unit tests only, on the logic that has a wrong answer rather than a wrong
+  // appearance: parsing another team's JSON, and the formatting the AI's scores
+  // are read through. Component rendering is verified against the running stack,
+  // where it can be judged, rather than asserted about in strings.
+  test: {
+    environment: 'node',
+    include: ['src/**/__tests__/**/*.test.ts'],
   },
   server: {
     port: 5173,
