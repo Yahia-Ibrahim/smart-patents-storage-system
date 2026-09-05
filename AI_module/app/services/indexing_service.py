@@ -40,6 +40,28 @@ class IndexingService:
         self.report_generator = report_generator
         self.similarity_engine = similarity_engine
         self.notification_producer = notification_producer
+        self._object_storage_client = None
+
+    def _get_object_storage_client(self):
+        """Lazily build the MinIO client used for ``s3://`` documents."""
+        if self._object_storage_client is None:
+            from minio import Minio
+
+            endpoint = os.getenv("S3_ENDPOINT", "minio:9000")
+            # Minio() wants a bare host:port, but the rest of the system
+            # configures endpoints as full URLs, so accept either.
+            parsed = urlparse(endpoint)
+            secure = parsed.scheme == "https"
+            host = parsed.netloc or parsed.path
+
+            self._object_storage_client = Minio(
+                host,
+                access_key=os.getenv("S3_ACCESS_KEY_ID", ""),
+                secret_key=os.getenv("S3_SECRET_ACCESS_KEY", ""),
+                secure=secure,
+            )
+
+        return self._object_storage_client
 
     def _download_document(self, payload: PatentSubmittedEventDTO | PatentApprovedEventDTO) -> str:
         """Download the patent document from the supplied MinIO-compatible object URL."""
@@ -51,6 +73,22 @@ class IndexingService:
         file_name = Path(parsed.path).name or f"patent-{payload.patentId}.pdf"
         destination = Path(os.getenv("TMP_DIR", "/tmp")) / file_name
         destination.parent.mkdir(parents=True, exist_ok=True)
+
+        if parsed.scheme == "s3":
+            # The patent backend stores documents in a private bucket and emits
+            # an s3://bucket/key URI rather than a presigned URL: a presigned
+            # URL would expire while the event was still queued, leaving events
+            # that could never be processed. Fetching by key has no expiry.
+            bucket = parsed.netloc
+            object_key = parsed.path.lstrip("/")
+
+            self._get_object_storage_client().fget_object(
+                bucket,
+                object_key,
+                str(destination),
+            )
+
+            return str(destination)
 
         # The service currently uses a direct HTTP download for object URLs.
         # This keeps the flow simple while still allowing MinIO-style URLs to pass through.
@@ -146,9 +184,21 @@ class IndexingService:
         self._insert_embedding_into_vector_store(payload, embedding)
 
     def handle_rejected_patent(self, payload: PatentRejectedEventDTO) -> None:
-        """Handle rejection of a patent by removing the embedding from the embedding repository if present."""
+        """Handle rejection of a patent by removing it from the cache and the vector store."""
         if self.embedding_repository is not None:
             try:
                 self.embedding_repository.delete_embedding(payload.patentId)
+            except Exception:
+                pass
+
+        # The vector store removal was missing, so a patent that was approved
+        # and later declined stayed in the similarity corpus permanently and
+        # kept being returned as prior art for new submissions. Kept as its own
+        # guarded block rather than sharing the one above: a failure to clear
+        # the cache must not skip removing the vector, which is the half that
+        # is externally visible.
+        if self.vector_store_service is not None:
+            try:
+                self.vector_store_service.delete_embedding(payload.patentId)
             except Exception:
                 return
