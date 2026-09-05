@@ -13,6 +13,7 @@ import {
   Modal,
   PageHeader,
   PasswordInput,
+  Textarea,
   RoleBadge,
   Skeleton,
   Spinner,
@@ -183,6 +184,19 @@ export function DesignSystemPage() {
             </FormField>
             <FormField label="Valid" success="Looks good">
               {({ id }) => <Input id={id} success defaultValue="ada@example.com" />}
+            </FormField>
+            <FormField
+              label="Long-form text"
+              hint="Abstracts, specifications, and examiner reasoning."
+            >
+              {({ id, describedBy }) => (
+                <Textarea
+                  id={id}
+                  aria-describedby={describedBy}
+                  rows={4}
+                  defaultValue="An apparatus for cooling a beverage container using an endothermic reaction chamber."
+                />
+              )}
             </FormField>
           </div>
         </Card>
